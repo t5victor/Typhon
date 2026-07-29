@@ -8,7 +8,7 @@ from thyphon.auction.domain.commands.open_auction.command import OpenAuction
 from thyphon.auction.domain.commands.place_competitive_bid.command import PlaceCompetitiveBid
 from thyphon.infrastructure.sqlite_event_store import SqliteEventStore
 from thyphon.projections.auction_overview import AuctionOverviewProjector
-from thyphon.shared.domain import DomainViolation, OptimisticConcurrencyConflict
+from thyphon.shared.domain import DomainViolation, IdempotencyKeyReused, OptimisticConcurrencyConflict, stream_key
 
 
 class AuctionBehaviour(unittest.TestCase):
@@ -46,7 +46,14 @@ class AuctionBehaviour(unittest.TestCase):
         )
         self.assertEqual(self.commands.place_competitive_bid(command), 2)
         self.assertEqual(self.commands.place_competitive_bid(command), 2)
-        self.assertEqual(len(self.store.read_stream("a-381")), 2)
+        self.assertEqual(len(self.store.read_stream(stream_key("auction", "a-381"))), 2)
+
+    def test_reusing_an_idempotency_key_for_another_intention_is_rejected(self) -> None:
+        with self.assertRaises(IdempotencyKeyReused):
+            self.commands.open_auction(OpenAuction(
+                auction_id="a-382", resource="Gold", quantity=10,
+                reserve_price=Decimal("100"), idempotency_key="open-a-381",
+            ))
 
     def test_projection_rebuild_equals_duplicate_safe_live_delivery(self) -> None:
         self.commands.place_competitive_bid(PlaceCompetitiveBid(

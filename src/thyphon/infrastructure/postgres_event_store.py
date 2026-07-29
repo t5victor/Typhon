@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from thyphon.infrastructure.sqlite_event_store import EVENT_TYPES, _decode_value
-from thyphon.shared.domain import DomainEvent, OptimisticConcurrencyConflict, RecordedEvent
+from thyphon.shared.domain import DomainEvent, IdempotencyKeyReused, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent
 
 
 class PostgresEventStore:
@@ -23,13 +23,17 @@ class PostgresEventStore:
         # Atomic appends still use the explicit `connection.transaction()` block below.
         self.connection = psycopg.connect(connection_string, autocommit=True)
 
-    def idempotency_result(self, idempotency_key: str) -> int | None:
+    def idempotency_result(self, idempotency_key: str, *, stream_id: str, command_name: str, request_hash: str) -> int | None:
         with self.connection.cursor() as cursor:
             cursor.execute(
-                "SELECT resulting_version FROM command_receipt WHERE idempotency_key = %s", (idempotency_key,)
+                "SELECT stream_id, command_name, request_hash, resulting_version FROM command_receipt WHERE idempotency_key = %s", (idempotency_key,)
             )
             row = cursor.fetchone()
-        return None if row is None else int(row[0])
+        if row is None:
+            return None
+        if tuple(row[:3]) != (stream_id, command_name, request_hash):
+            raise IdempotencyKeyReused("idempotency key was already used for a different command")
+        return int(row[3])
 
     def read_stream(self, stream_id: str) -> list[RecordedEvent]:
         with self.connection.cursor() as cursor:
@@ -41,16 +45,21 @@ class PostgresEventStore:
         return [self._recorded(*row) for row in rows]
 
     def append(
-        self, *, stream_id: str, expected_version: int, events: list[DomainEvent], idempotency_key: str
+        self, *, stream_id: str, expected_version: int, events: list[DomainEvent], idempotency_key: str,
+        command_name: str, request_hash: str,
     ) -> int:
         with self.connection.transaction(), self.connection.cursor() as cursor:
             cursor.execute(
-                "SELECT resulting_version FROM command_receipt WHERE idempotency_key = %s FOR UPDATE",
+                "SELECT stream_id, command_name, request_hash, resulting_version FROM command_receipt WHERE idempotency_key = %s FOR UPDATE",
                 (idempotency_key,),
             )
             receipt = cursor.fetchone()
             if receipt is not None:
-                return int(receipt[0])
+                if tuple(receipt[:3]) != (stream_id, command_name, request_hash):
+                    raise IdempotencyKeyReused("idempotency key was already used for a different command")
+                return int(receipt[3])
+            if not events:
+                raise ValueError("an append requires at least one domain event")
             cursor.execute(
                 "SELECT COALESCE(MAX(stream_version), 0) FROM event_stream WHERE stream_id = %s", (stream_id,)
             )
@@ -61,6 +70,20 @@ class PostgresEventStore:
                 )
             version = actual_version
             for event in events:
+                if event.event_name in {"SettlementConfirmed", "LateSettlementDetected"}:
+                    provider_reference = str(event.payload()["provider_reference"])
+                    cursor.execute(
+                        "SELECT settlement_stream_id FROM provider_reference_claim WHERE provider_reference=%s FOR UPDATE",
+                        (provider_reference,),
+                    )
+                    claim = cursor.fetchone()
+                    if claim is not None and claim[0] != stream_id:
+                        raise ProviderReferenceAlreadyObserved("provider reference belongs to another settlement")
+                    cursor.execute(
+                        "INSERT INTO provider_reference_claim(provider_reference, settlement_stream_id) VALUES (%s, %s) "
+                        "ON CONFLICT (provider_reference) DO NOTHING",
+                        (provider_reference, stream_id),
+                    )
                 version += 1
                 payload = event.payload()
                 cursor.execute(
@@ -79,9 +102,9 @@ class PostgresEventStore:
                     (event.event_id, "thyphon.domain-events", stream_id, json.dumps(envelope)),
                 )
             cursor.execute(
-                "INSERT INTO command_receipt(idempotency_key, stream_id, resulting_version, accepted_at) "
-                "VALUES (%s, %s, %s, %s)",
-                (idempotency_key, stream_id, version, datetime.now(UTC)),
+                "INSERT INTO command_receipt(idempotency_key, stream_id, command_name, request_hash, resulting_version, accepted_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (idempotency_key, stream_id, command_name, request_hash, version, datetime.now(UTC)),
             )
             return version
 

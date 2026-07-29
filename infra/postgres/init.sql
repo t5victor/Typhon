@@ -11,6 +11,8 @@ CREATE TABLE event_stream (
 CREATE TABLE command_receipt (
     idempotency_key TEXT PRIMARY KEY,
     stream_id TEXT NOT NULL,
+    command_name TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
     resulting_version BIGINT NOT NULL,
     accepted_at TIMESTAMPTZ NOT NULL
 );
@@ -38,6 +40,11 @@ CREATE TABLE projection_receipt (
     consumer_name TEXT NOT NULL,
     event_id UUID NOT NULL,
     PRIMARY KEY (consumer_name, event_id)
+);
+
+CREATE TABLE provider_reference_claim (
+    provider_reference TEXT PRIMARY KEY,
+    settlement_stream_id TEXT NOT NULL
 );
 
 CREATE TABLE process_checkpoint (

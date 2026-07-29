@@ -6,7 +6,12 @@ import os
 import sys
 from typing import Any
 
+from thyphon.application.settlement_commands import SettlementCommandHandler
 from thyphon.projections.postgres_auction_overview import PostgresAuctionOverviewProjector
+from thyphon.infrastructure.postgres_event_store import PostgresEventStore
+from thyphon.auction.domain.events.winning_bid_accepted.event import WinningBidAccepted
+from thyphon.settlement.domain.commands.request_settlement.command import RequestSettlement
+from thyphon.shared.domain import aggregate_id
 
 
 def _runtime():
@@ -55,6 +60,7 @@ async def run_projection() -> None:
     bootstrap = os.environ["THYPHON_KAFKA_BOOTSTRAP"]
     dsn = os.environ["THYPHON_DATABASE_URL"]
     projector = PostgresAuctionOverviewProjector(dsn)
+    settlements = SettlementCommandHandler(PostgresEventStore(dsn))
     consumer = consumer_type(
         "thyphon.domain-events", bootstrap_servers=bootstrap, group_id="thyphon-auction-overview-v1",
         enable_auto_commit=False, auto_offset_reset="earliest",
@@ -63,7 +69,17 @@ async def run_projection() -> None:
     try:
         async for message in consumer:
             envelope: dict[str, Any] = json.loads(message.value)
-            projector.apply(projector.decode(envelope))
+            recorded = projector.decode(envelope)
+            projector.apply(recorded)
+            if isinstance(recorded.event, WinningBidAccepted):
+                # Settlement is derived from a fact already accepted by Auction, never from client supplied money.
+                settlements.request_settlement(RequestSettlement(
+                    settlement_id=f"settlement-{aggregate_id(recorded.stream_id, 'auction')}",
+                    auction_id=aggregate_id(recorded.stream_id, "auction"),
+                    payer_company_id=recorded.event.company_id,
+                    amount=recorded.event.accepted_offer,
+                    idempotency_key=f"winning-bid:{recorded.event.event_id}",
+                ))
             await consumer.commit()
     finally:
         await consumer.stop()

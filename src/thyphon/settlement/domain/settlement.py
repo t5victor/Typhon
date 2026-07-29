@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from thyphon.settlement.domain.events.late_settlement_detected.event import LateSettlementDetected
+from thyphon.settlement.domain.events.refund_completed.event import RefundCompleted
+from thyphon.settlement.domain.events.refund_failed.event import RefundFailed
 from thyphon.settlement.domain.events.refund_requested.event import RefundRequested
 from thyphon.settlement.domain.events.settlement_confirmed.event import SettlementConfirmed
 from thyphon.settlement.domain.events.settlement_rejected.event import SettlementRejected
@@ -47,8 +49,22 @@ class Settlement:
                 provider_reference=provider_reference, amount=self.amount,
                 reason="settlement arrived after release of the winning claim",
             ))
+            # A late confirmation creates exactly one compensation workflow and never revives the claim.
+            self.lifecycle = "refund_pending"
         else:
             raise DomainViolation("only a requested or rejected settlement can receive confirmation")
+
+    def complete_refund(self, provider_reference: str) -> None:
+        if self.lifecycle != "refund_pending":
+            raise DomainViolation("only a pending refund can be completed")
+        self._record(RefundCompleted.now(provider_reference=provider_reference))
+
+    def fail_refund(self, provider_reference: str, failure_reason: str) -> None:
+        if self.lifecycle != "refund_pending" or not failure_reason.strip():
+            raise DomainViolation("only a pending refund can fail with a reason")
+        self._record(RefundFailed.now(
+            provider_reference=provider_reference, failure_reason=failure_reason
+        ))
 
     def reject(self, rejection_reason: str) -> None:
         if self.lifecycle != "requested" or not rejection_reason.strip():
@@ -71,7 +87,13 @@ class Settlement:
                 self.lifecycle = "confirmed"
             case SettlementRejected():
                 self.lifecycle = "rejected"
-            case LateSettlementDetected() | RefundRequested():
+            case LateSettlementDetected():
                 pass
+            case RefundRequested():
+                self.lifecycle = "refund_pending"
+            case RefundCompleted():
+                self.lifecycle = "refunded"
+            case RefundFailed():
+                self.lifecycle = "refund_failed"
             case _:
                 raise TypeError(f"Settlement cannot apply {type(event).__name__}")

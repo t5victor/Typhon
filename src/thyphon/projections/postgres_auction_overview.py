@@ -9,7 +9,7 @@ from thyphon.auction.domain.events.auction_opened.event import AuctionOpened
 from thyphon.auction.domain.events.competitive_bid_placed.event import CompetitiveBidPlaced
 from thyphon.auction.domain.events.winning_bid_accepted.event import WinningBidAccepted
 from thyphon.infrastructure.sqlite_event_store import EVENT_TYPES, _decode_value
-from thyphon.shared.domain import DomainEvent, RecordedEvent
+from thyphon.shared.domain import DomainEvent, RecordedEvent, aggregate_id
 
 
 class PostgresAuctionOverviewProjector:
@@ -38,30 +38,31 @@ class PostgresAuctionOverviewProjector:
                     "INSERT INTO projection_receipt(consumer_name, event_id) VALUES (%s, %s)",
                     (self.consumer_name, recorded.event.event_id),
                 )
+                auction_id = aggregate_id(recorded.stream_id, "auction")
                 match recorded.event:
                     case AuctionOpened(resource=resource, quantity=quantity, reserve_price=reserve):
                         cursor.execute(
                             "INSERT INTO auction_overview VALUES (%s, %s, %s, %s, NULL, NULL, 'open', %s) "
                             "ON CONFLICT (auction_id) DO NOTHING",
-                            (recorded.stream_id, resource, quantity, reserve, recorded.stream_version),
+                            (auction_id, resource, quantity, reserve, recorded.stream_version),
                         )
                     case CompetitiveBidPlaced(company_id=company, offer=offer):
                         cursor.execute(
                             "UPDATE auction_overview SET leading_company_id=%s, leading_offer=%s, stream_version=%s "
                             "WHERE auction_id=%s AND stream_version < %s",
-                            (company, offer, recorded.stream_version, recorded.stream_id, recorded.stream_version),
+                            (company, offer, recorded.stream_version, auction_id, recorded.stream_version),
                         )
                     case WinningBidAccepted():
                         cursor.execute(
                             "UPDATE auction_overview SET lifecycle='allocated', stream_version=%s "
                             "WHERE auction_id=%s AND stream_version < %s",
-                            (recorded.stream_version, recorded.stream_id, recorded.stream_version),
+                            (recorded.stream_version, auction_id, recorded.stream_version),
                         )
                     case AuctionExpired():
                         cursor.execute(
                             "UPDATE auction_overview SET lifecycle='expired', stream_version=%s "
                             "WHERE auction_id=%s AND stream_version < %s",
-                            (recorded.stream_version, recorded.stream_id, recorded.stream_version),
+                            (recorded.stream_version, auction_id, recorded.stream_version),
                         )
                     case _:
                         pass

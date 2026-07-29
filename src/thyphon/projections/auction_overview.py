@@ -7,7 +7,7 @@ from thyphon.auction.domain.events.auction_opened.event import AuctionOpened
 from thyphon.auction.domain.events.competitive_bid_placed.event import CompetitiveBidPlaced
 from thyphon.auction.domain.events.winning_bid_accepted.event import WinningBidAccepted
 from thyphon.infrastructure.sqlite_event_store import SqliteEventStore
-from thyphon.shared.domain import RecordedEvent
+from thyphon.shared.domain import RecordedEvent, aggregate_id
 
 
 class AuctionOverviewProjector:
@@ -24,27 +24,28 @@ class AuctionOverviewProjector:
                     "INSERT INTO projection_receipt VALUES (?, ?)",
                     (self.consumer_name, str(recorded.event.event_id)),
                 )
+                auction_id = aggregate_id(recorded.stream_id, "auction")
                 match recorded.event:
                     case AuctionOpened(resource=resource, quantity=quantity, reserve_price=reserve):
                         self.store.connection.execute(
                             "INSERT INTO auction_overview VALUES (?, ?, ?, ?, NULL, NULL, 'open', ?)",
-                            (recorded.stream_id, resource, quantity, str(reserve), recorded.stream_version),
+                            (auction_id, resource, quantity, str(reserve), recorded.stream_version),
                         )
                     case CompetitiveBidPlaced(company_id=company, offer=offer):
                         self.store.connection.execute(
                             "UPDATE auction_overview SET leading_company_id=?, leading_offer=?, stream_version=? "
                             "WHERE auction_id=?",
-                            (company, str(offer), recorded.stream_version, recorded.stream_id),
+                            (company, str(offer), recorded.stream_version, auction_id),
                         )
                     case WinningBidAccepted():
                         self.store.connection.execute(
                             "UPDATE auction_overview SET lifecycle='allocated', stream_version=? WHERE auction_id=?",
-                            (recorded.stream_version, recorded.stream_id),
+                            (recorded.stream_version, auction_id),
                         )
                     case AuctionExpired():
                         self.store.connection.execute(
                             "UPDATE auction_overview SET lifecycle='expired', stream_version=? WHERE auction_id=?",
-                            (recorded.stream_version, recorded.stream_id),
+                            (recorded.stream_version, auction_id),
                         )
                     case _:
                         pass

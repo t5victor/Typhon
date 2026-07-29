@@ -17,10 +17,12 @@ from thyphon.company.domain.events.company_onboarded.event import CompanyOnboard
 from thyphon.company.domain.events.risk_appetite_changed.event import RiskAppetiteChanged
 from thyphon.settlement.domain.events.late_settlement_detected.event import LateSettlementDetected
 from thyphon.settlement.domain.events.refund_requested.event import RefundRequested
+from thyphon.settlement.domain.events.refund_completed.event import RefundCompleted
+from thyphon.settlement.domain.events.refund_failed.event import RefundFailed
 from thyphon.settlement.domain.events.settlement_confirmed.event import SettlementConfirmed
 from thyphon.settlement.domain.events.settlement_rejected.event import SettlementRejected
 from thyphon.settlement.domain.events.settlement_requested.event import SettlementRequested
-from thyphon.shared.domain import DomainEvent, OptimisticConcurrencyConflict, RecordedEvent
+from thyphon.shared.domain import DomainEvent, IdempotencyKeyReused, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent
 
 
 EVENT_TYPES: dict[str, type[DomainEvent]] = {
@@ -28,6 +30,7 @@ EVENT_TYPES: dict[str, type[DomainEvent]] = {
         AuctionOpened, CompetitiveBidPlaced, WinningBidAccepted, AuctionExpired,
         CompanyOnboarded, RiskAppetiteChanged,
         SettlementRequested, SettlementConfirmed, SettlementRejected, LateSettlementDetected, RefundRequested,
+        RefundCompleted, RefundFailed,
     )
 }
 
@@ -37,7 +40,7 @@ def _decode_value(name: str, value: Any) -> Any:
         return UUID(value)
     if name in {"occurred_at", "expired_at"}:
         return datetime.fromisoformat(value)
-    if name in {"reserve_price", "offer", "accepted_offer", "opening_capital", "risk_appetite", "former_appetite", "new_appetite"}:
+    if name in {"reserve_price", "offer", "accepted_offer", "opening_capital", "risk_appetite", "former_appetite", "new_appetite", "amount"}:
         return Decimal(value)
     return value
 
@@ -61,7 +64,8 @@ class SqliteEventStore:
               UNIQUE(stream_id, stream_version)
             );
             CREATE TABLE IF NOT EXISTS command_receipt (
-              idempotency_key TEXT PRIMARY KEY, stream_id TEXT NOT NULL, resulting_version INTEGER NOT NULL
+              idempotency_key TEXT PRIMARY KEY, stream_id TEXT NOT NULL, command_name TEXT NOT NULL,
+              request_hash TEXT NOT NULL, resulting_version INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS transactional_outbox (
               event_id TEXT PRIMARY KEY, topic TEXT NOT NULL, partition_key TEXT NOT NULL,
@@ -75,6 +79,9 @@ class SqliteEventStore:
             CREATE TABLE IF NOT EXISTS projection_receipt (
               consumer_name TEXT NOT NULL, event_id TEXT NOT NULL, PRIMARY KEY(consumer_name, event_id)
             );
+            CREATE TABLE IF NOT EXISTS provider_reference_claim (
+              provider_reference TEXT PRIMARY KEY, settlement_stream_id TEXT NOT NULL
+            );
             """
         )
         self.connection.commit()
@@ -85,20 +92,26 @@ class SqliteEventStore:
         ).fetchall()
         return [self._recorded(row) for row in rows]
 
-    def idempotency_result(self, idempotency_key: str) -> int | None:
+    def idempotency_result(self, idempotency_key: str, *, stream_id: str, command_name: str, request_hash: str) -> int | None:
         receipt = self.connection.execute(
-            "SELECT resulting_version FROM command_receipt WHERE idempotency_key = ?", (idempotency_key,)
+            "SELECT * FROM command_receipt WHERE idempotency_key = ?", (idempotency_key,)
         ).fetchone()
-        return None if receipt is None else int(receipt["resulting_version"])
+        if receipt is None:
+            return None
+        if (receipt["stream_id"], receipt["command_name"], receipt["request_hash"]) != (stream_id, command_name, request_hash):
+            raise IdempotencyKeyReused("idempotency key was already used for a different command")
+        return int(receipt["resulting_version"])
 
     def all_events(self) -> list[RecordedEvent]:
         return [self._recorded(row) for row in self.connection.execute(
             "SELECT * FROM event_stream ORDER BY occurred_at, event_id"
         )]
 
-    def append(self, *, stream_id: str, expected_version: int, events: list[DomainEvent], idempotency_key: str) -> int:
+    def append(self, *, stream_id: str, expected_version: int, events: list[DomainEvent], idempotency_key: str, command_name: str, request_hash: str) -> int:
         with self.connection:
-            receipt = self.idempotency_result(idempotency_key)
+            if not events:
+                raise ValueError("an append requires at least one domain event")
+            receipt = self.idempotency_result(idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash)
             if receipt is not None:
                 return receipt
             actual = self.connection.execute(
@@ -111,6 +124,18 @@ class SqliteEventStore:
                 )
             version = actual
             for event in events:
+                if event.event_name in {"SettlementConfirmed", "LateSettlementDetected"}:
+                    provider_reference = str(event.payload()["provider_reference"])
+                    claim = self.connection.execute(
+                        "SELECT settlement_stream_id FROM provider_reference_claim WHERE provider_reference=?",
+                        (provider_reference,),
+                    ).fetchone()
+                    if claim is not None and claim["settlement_stream_id"] != stream_id:
+                        raise ProviderReferenceAlreadyObserved("provider reference belongs to another settlement")
+                    self.connection.execute(
+                        "INSERT OR IGNORE INTO provider_reference_claim VALUES (?, ?)",
+                        (provider_reference, stream_id),
+                    )
                 version += 1
                 body = json.dumps(event.payload(), sort_keys=True)
                 self.connection.execute(
@@ -122,7 +147,7 @@ class SqliteEventStore:
                     (str(event.event_id), "thyphon.domain-events", stream_id, body),
                 )
             self.connection.execute(
-                "INSERT INTO command_receipt VALUES (?, ?, ?)", (idempotency_key, stream_id, version)
+                "INSERT INTO command_receipt VALUES (?, ?, ?, ?, ?)", (idempotency_key, stream_id, command_name, request_hash, version)
             )
             return version
 

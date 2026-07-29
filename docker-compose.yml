@@ -50,7 +50,16 @@ services:
     command: ["uvicorn", "thyphon.api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       THYPHON_DATABASE_URL: postgresql://thyphon:thyphon@postgres:5432/thyphon
+      THYPHON_API_KEYS: '{"local-supplier":{"actor_id":"nordic-mining","role":"supplier"},"local-bidder-nova":{"actor_id":"nova-corp","role":"bidder"},"local-operator":{"actor_id":"thyphon-operator","role":"operator"},"local-payment-provider":{"actor_id":"payment-simulator","role":"payment-provider"}}'
     ports: ["127.0.0.1:18000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+  migrate:
+    image: thyphon-api:phase-2
+    command: ["python", "-m", "thyphon.infrastructure.migrate"]
+    environment:
+      THYPHON_DATABASE_URL: postgresql://thyphon:thyphon@postgres:5432/thyphon
     depends_on:
       postgres: { condition: service_healthy }
   outbox-worker:
@@ -62,6 +71,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
   projection-worker:
     image: thyphon-api:phase-2
     command: ["python", "-m", "thyphon.workers.main", "projection"]
@@ -71,6 +81,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
 
 volumes:
   thyphon-postgres-data:

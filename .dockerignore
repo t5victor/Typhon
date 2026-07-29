@@ -1,0 +1,12 @@
+.git
+.gitignore
+__pycache__
+*.py[cod]
+.bazel
+bazel-*
+.thyphon
+.pytest_cache
+.mypy_cache
+.pyright
+dist
+build
