@@ -1,0 +1,1 @@
+"""Auction-domain behavioural tests."""

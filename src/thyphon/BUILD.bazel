@@ -1,0 +1,49 @@
+package(default_visibility = ["//visibility:public"])
+
+py_library(
+    name = "core",
+    srcs = glob(["**/*.py"], exclude = ["**/tests/**"]),
+    imports = [".."],
+)
+
+py_test(
+    name = "auction_domain_tests",
+    srcs = ["auction/domain/tests/test_auction.py"],
+    main = "auction/domain/tests/test_auction.py",
+    deps = [":core"],
+)
+
+py_test(
+    name = "settlement_domain_tests",
+    srcs = ["settlement/domain/tests/test_settlement.py"],
+    main = "settlement/domain/tests/test_settlement.py",
+    deps = [":core"],
+)
+
+py_test(
+    name = "tui_presentation_tests",
+    srcs = ["tui/tests/test_dashboard.py"],
+    main = "tui/tests/test_dashboard.py",
+    deps = [":core"],
+)
+
+py_test(
+    name = "live_simulation_tests",
+    srcs = ["tui/tests/test_live_simulation.py"],
+    main = "tui/tests/test_live_simulation.py",
+    deps = [":core"],
+)
+
+py_test(
+    name = "intention_naming_tests",
+    srcs = ["shared/tests/test_intention_naming.py"],
+    main = "shared/tests/test_intention_naming.py",
+    deps = [":core"],
+)
+
+py_test(
+    name = "company_domain_tests",
+    srcs = ["company/domain/tests/test_company.py"],
+    main = "company/domain/tests/test_company.py",
+    deps = [":core"],
+)

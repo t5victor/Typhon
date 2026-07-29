@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+from random import Random
+
+from thyphon.application.auction_commands import AuctionCommandHandler
+from thyphon.auction.domain.commands.open_auction.command import OpenAuction
+from thyphon.auction.domain.commands.place_competitive_bid.command import PlaceCompetitiveBid
+from thyphon.infrastructure.kafka_outbox_dispatcher import KafkaOutboxDispatcher
+from thyphon.infrastructure.sqlite_event_store import SqliteEventStore
+from thyphon.projections.auction_overview import AuctionOverviewProjector
+from thyphon.shared.domain import DomainViolation
+
+
+@dataclass(frozen=True)
+class MarketTick:
+    index: int
+    company_name: str
+    offer: Decimal
+    outcome: str
+    market_note: str
+
+
+@dataclass
+class CompanyPulse:
+    name: str
+    strategy: str
+    risk: Decimal
+    cash: Decimal
+    bids: int = 0
+    last_action: str = "observing market"
+
+
+class DeterministicMarket:
+    def __init__(self, seed: int) -> None:
+        self.seed = seed
+        self.store = SqliteEventStore()
+        self.commands = AuctionCommandHandler(self.store)
+        self.projector = AuctionOverviewProjector(self.store)
+        self.tape: list[MarketTick] = []
+        self._published: list[tuple[str, str, bytes]] = []
+        self.random = Random(seed)
+        self.tick = 0
+        self.started = False
+        self.prices = {
+            "Lithium": Decimal("212.00"),
+            "Gold": Decimal("154.32"),
+            "Copper": Decimal("23.12"),
+            "Titanium": Decimal("88.90"),
+        }
+        self.opening_prices = dict(self.prices)
+        self.price_history = {resource: [price] for resource, price in self.prices.items()}
+        self.last_moves = {resource: Decimal("0") for resource in self.prices}
+        self.companies = {
+            "Astra Industries": CompanyPulse("Astra Industries", "AGGRESSIVE", Decimal("0.85"), Decimal("12.3")),
+            "Helios Dynamics": CompanyPulse("Helios Dynamics", "MOMENTUM", Decimal("0.72"), Decimal("8.4")),
+            "Nova Corp": CompanyPulse("Nova Corp", "LONG-TERM", Decimal("0.18"), Decimal("200.0")),
+            "Blue Horizon": CompanyPulse("Blue Horizon", "VALUE", Decimal("0.41"), Decimal("42.8")),
+        }
+
+    def run(self, ticks: int) -> None:
+        self.bootstrap()
+        for _ in range(ticks):
+            self.advance()
+
+    def bootstrap(self) -> None:
+        if self.started:
+            return
+        self.commands.open_auction(OpenAuction(
+            auction_id="auction-lithium-381", resource="Lithium", quantity=1200,
+            reserve_price=Decimal("212.00"), idempotency_key=f"seed:{self.seed}:open",
+        ))
+        self.started = True
+        self._flush_events(duplicate_first=True)
+
+    def advance(self) -> None:
+        self.bootstrap()
+        self.tick += 1
+        self._move_prices()
+        companies = ("Astra Industries", "Helios Dynamics", "Nova Corp", "Blue Horizon")
+        company = companies[self.random.randrange(len(companies))]
+        overview = self.projector.overview("auction-lithium-381")
+        current_offer = Decimal(overview["leading_offer"] or overview["reserve_price"])
+        offer = current_offer + Decimal(self.random.randint(1, 7))
+        try:
+            self.commands.place_competitive_bid(PlaceCompetitiveBid(
+                auction_id="auction-lithium-381", company_id=company, offer=offer,
+                idempotency_key=f"seed:{self.seed}:tick:{self.tick}",
+            ))
+            outcome = "COMPETITIVE BID ACCEPTED"
+        except DomainViolation as error:
+            outcome = f"REJECTED: {error}"
+        pulse = self.companies[company]
+        pulse.bids += 1
+        pulse.last_action = f"bid {offer:.2f} EUR on Lithium"
+        pulse.cash = max(Decimal("0"), pulse.cash - (offer - current_offer) / Decimal("100"))
+        note = self._market_note()
+        self.tape.append(MarketTick(self.tick, company, offer, outcome, note))
+        self._flush_events()
+
+    def _flush_events(self, duplicate_first: bool = False) -> None:
+        dispatcher = KafkaOutboxDispatcher(
+            self.store, lambda topic, key, body: self._published.append((topic, key, body))
+        )
+        dispatcher.deliver_pending(duplicate_first=duplicate_first)
+        for event in self.store.all_events():
+            self.projector.apply(event)
+
+    def _move_prices(self) -> None:
+        for resource, price in self.prices.items():
+            basis_points = self.random.randint(-120, 180)
+            move = Decimal(basis_points) / Decimal("100")
+            self.last_moves[resource] = move
+            self.prices[resource] = max(Decimal("0.01"), price * (Decimal("1") + move / Decimal("100"))).quantize(Decimal("0.01"))
+            self.price_history[resource].append(self.prices[resource])
+            self.price_history[resource] = self.price_history[resource][-36:]
+
+    def _market_note(self) -> str:
+        strongest = max(self.last_moves, key=lambda resource: abs(self.last_moves[resource]))
+        move = self.last_moves[strongest]
+        direction = "demand pulse" if move > 0 else "supply pressure"
+        return f"{strongest} {direction} {move:+.2f}%"
+
+    def price_change(self, resource: str) -> Decimal:
+        return ((self.prices[resource] / self.opening_prices[resource]) - Decimal("1")) * Decimal("100")

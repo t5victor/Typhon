@@ -1,0 +1,26 @@
+[project]
+name = "thyphon"
+version = "0.1.0"
+description = "Thyphon event-sourced commodity allocation exchange"
+requires-python = ">=3.13"
+
+[project.optional-dependencies]
+runtime = ["fastapi>=0.116", "uvicorn>=0.35", "psycopg[binary]>=3.2", "aiokafka>=0.12"]
+dev = ["ruff>=0.12", "pyright>=1.1"]
+
+[project.scripts]
+thyphon = "thyphon.tui.main:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"

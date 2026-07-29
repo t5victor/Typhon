@@ -1,0 +1,6 @@
+py_binary(
+    name = "tui",
+    srcs = ["tui_main.py"],
+    main = "tui_main.py",
+    deps = ["//src/thyphon:core"],
+)
