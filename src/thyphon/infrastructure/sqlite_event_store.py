@@ -21,7 +21,7 @@ from thyphon.settlement.domain.events.refund_failed.event import RefundFailed
 from thyphon.settlement.domain.events.settlement_confirmed.event import SettlementConfirmed
 from thyphon.settlement.domain.events.settlement_rejected.event import SettlementRejected
 from thyphon.settlement.domain.events.settlement_requested.event import SettlementRequested
-from thyphon.shared.domain import CommandContext, DomainEvent, IdempotencyKeyReused, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent, SettlementAlreadyRequestedForWinningBid
+from thyphon.shared.domain import CommandContext, DomainEvent, IdempotencyKeyReused, InvalidSettlementCausation, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent, SettlementAlreadyRequestedForWinningBid
 
 
 EVENT_TYPES: dict[str, type[DomainEvent]] = {
@@ -43,6 +43,8 @@ def upcast_event(event_name: str, schema_version: int, payload: dict[str, Any]) 
     if event_name not in EVENT_TYPES:
         raise ValueError(f"unsupported event contract: {event_name}")
     current = EVENT_SCHEMA_VERSIONS[event_name]
+    if schema_version < 1:
+        raise ValueError(f"{event_name} v{schema_version} is not a valid event schema version")
     if schema_version > current:
         raise ValueError(f"{event_name} v{schema_version} is newer than this reader")
     if event_name == "SettlementRequested" and schema_version == 1:
@@ -54,7 +56,7 @@ def upcast_event(event_name: str, schema_version: int, payload: dict[str, Any]) 
 
 
 def _decode_value(name: str, value: Any) -> Any:
-    if name in {"event_id"}:
+    if name in {"event_id", "winning_bid_event_id"} and value is not None:
         return UUID(value)
     if name in {"occurred_at", "expired_at"}:
         return datetime.fromisoformat(value)
@@ -163,6 +165,16 @@ class SqliteEventStore:
             for event in events:
                 if event.event_name == "SettlementRequested":
                     winning_bid_event_id = str(event.payload()["winning_bid_event_id"])
+                    cause = self.connection.execute(
+                        "SELECT event_name, stream_id, payload FROM event_stream WHERE event_id=?", (winning_bid_event_id,)
+                    ).fetchone()
+                    expected_auction_stream = f"auction:{event.payload()['auction_id']}"
+                    if (
+                        cause is None or cause["event_name"] != "WinningBidAccepted" or cause["stream_id"] != expected_auction_stream
+                        or json.loads(cause["payload"]).get("company_id") != event.payload()["payer_company_id"]
+                        or json.loads(cause["payload"]).get("accepted_offer") != event.payload()["amount"]
+                    ):
+                        raise InvalidSettlementCausation("SettlementRequested must cite its Auction's canonical WinningBidAccepted event")
                     self.connection.execute(
                         "INSERT OR IGNORE INTO settlement_causation_claim VALUES (?, ?)",
                         (winning_bid_event_id, stream_id),

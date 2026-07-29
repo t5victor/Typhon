@@ -29,6 +29,10 @@ class SettlementAlreadyRequestedForWinningBid(Exception):
     """A winning bid can cause one and only one settlement stream."""
 
 
+class InvalidSettlementCausation(Exception):
+    """A Settlement must be caused by the canonical winning bid of its Auction."""
+
+
 @dataclass(frozen=True)
 class CommandContext:
     """Delivery metadata kept outside the domain intention.
@@ -47,15 +51,24 @@ class CommandContext:
 
 def command_metadata(command: Any) -> tuple[str, str]:
     """Stable content fingerprint for a domain intention only."""
-    def encode(value: Any) -> Any:
-        if isinstance(value, Decimal):
-            return str(value)
-        if isinstance(value, datetime):
-            return value.isoformat()
-        return value
-    payload = {key: encode(value) for key, value in asdict(command).items()}
+    payload = canonical_json_value(asdict(command))
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return type(command).__name__, hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def canonical_json_value(value: Any) -> Any:
+    """Encode command values deterministically without transport-specific casts."""
+    if isinstance(value, (Decimal, UUID)):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [canonical_json_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [canonical_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): canonical_json_value(item) for key, item in value.items()}
+    return value
 
 
 def stream_key(aggregate_type: str, aggregate_id: str) -> str:

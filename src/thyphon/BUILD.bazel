@@ -54,3 +54,17 @@ py_test(
     main = "company/domain/tests/test_company.py",
     deps = [":core"],
 )
+
+py_test(
+    name = "auction_projection_tests",
+    srcs = ["projections/tests/test_auction_overview.py"],
+    main = "projections/tests/test_auction_overview.py",
+    deps = [":core"],
+)
+
+py_test(
+    name = "worker_delivery_tests",
+    srcs = ["workers/tests/test_delivery_guardrails.py"],
+    main = "workers/tests/test_delivery_guardrails.py",
+    deps = [":core"],
+)

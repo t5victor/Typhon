@@ -16,7 +16,7 @@ This delivery contains the complete auction path rather than a throwaway MVP:
 - Intention-led command and fact-led event catalog, with one directory per command/event.
 - Optimistic stream versioning, command idempotency, transactional outbox, and idempotent projectors.
 - PostgreSQL and Kafka runtime topology in Docker Compose; SQLite test adapter for hermetic Bazel tests.
-- Versioned event envelopes with correlation/causation/actor metadata, explicit upcaster seam, and globally ordered replay.
+- Versioned event envelopes with correlation/causation/actor metadata, explicit upcaster seam, and globally ordered replay; Kafka deliveries are checked against the immutable PostgreSQL fact before processing.
 - Separate auction read model, coordinated rebuild facility, deterministic simulation, and a poison-event DLQ.
 - A curses ASCII TUI with synthetic market telemetry; it does not claim to display Kafka runtime telemetry.
 - Bazel targets for domain, application and TUI suites.
@@ -56,7 +56,7 @@ curl 'http://127.0.0.1:18000/queries/auctions/lithium-381?minimum_version=1'
 ```
 
 `minimum_version` never blocks an API worker: it returns `202` plus `Retry-After` until its projection catches up.
-Run `./scripts/verify_live.zsh` after Compose is ready to exercise authenticated command flow, Kafka delivery,
+Run `./scripts/verify_live.zsh` after Compose is ready to exercise authenticated command flow, canonical Kafka delivery,
 projection catch-up and event-envelope metadata. The script intentionally uses a fresh, unique auction id each run.
 
 ## Repeatable performance baseline

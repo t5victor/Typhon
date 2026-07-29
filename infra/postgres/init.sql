@@ -61,7 +61,7 @@ CREATE TABLE provider_reference_claim (
 );
 
 CREATE TABLE settlement_causation_claim (
-    winning_bid_event_id UUID PRIMARY KEY,
+    winning_bid_event_id UUID PRIMARY KEY REFERENCES event_stream(event_id),
     settlement_stream_id TEXT NOT NULL
 );
 
@@ -79,5 +79,28 @@ CREATE TABLE projection_failure (
     redriven_at TIMESTAMPTZ,
     resolved_at TIMESTAMPTZ,
     redrive_count INTEGER NOT NULL DEFAULT 0,
+    active_redrive_attempt_id UUID,
     PRIMARY KEY (consumer_name, event_id)
+);
+
+CREATE TABLE projection_raw_failure (
+    consumer_name TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    partition_id INTEGER NOT NULL,
+    message_offset BIGINT NOT NULL,
+    raw_value BYTEA,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL,
+    quarantined_at TIMESTAMPTZ,
+    PRIMARY KEY (consumer_name, topic, partition_id, message_offset)
+);
+
+CREATE TABLE projection_redrive_attempt (
+    attempt_id UUID PRIMARY KEY,
+    consumer_name TEXT NOT NULL,
+    event_id UUID NOT NULL,
+    envelope JSONB NOT NULL,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    published_at TIMESTAMPTZ,
+    resolved_at TIMESTAMPTZ
 );

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from decimal import Decimal
+from uuid import UUID
 
 
 @dataclass(frozen=True)
@@ -8,4 +9,4 @@ class RequestSettlement:
     auction_id: str
     payer_company_id: str
     amount: Decimal
-    winning_bid_event_id: str
+    winning_bid_event_id: UUID

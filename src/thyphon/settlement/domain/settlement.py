@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+from uuid import UUID
 
 from thyphon.settlement.domain.events.late_settlement_detected.event import LateSettlementDetected
 from thyphon.settlement.domain.events.refund_completed.event import RefundCompleted
@@ -18,7 +19,7 @@ class Settlement:
     stream_id: str
     auction_id: str | None = None
     payer_company_id: str | None = None
-    winning_bid_event_id: str | None = None
+    winning_bid_event_id: UUID | None = None
     refund_provider_reference: str | None = None
     amount: Decimal = Decimal("0")
     lifecycle: str = "unrequested"
@@ -33,8 +34,8 @@ class Settlement:
             settlement.version += 1
         return settlement
 
-    def request(self, auction_id: str, payer_company_id: str, amount: Decimal, winning_bid_event_id: str) -> None:
-        if self.lifecycle != "unrequested" or amount <= 0 or not winning_bid_event_id.strip():
+    def request(self, auction_id: str, payer_company_id: str, amount: Decimal, winning_bid_event_id: UUID) -> None:
+        if self.lifecycle != "unrequested" or amount <= 0 or not isinstance(winning_bid_event_id, UUID):
             raise DomainViolation("a settlement request must name a new positive-value obligation and its winning bid")
         self._record(SettlementRequested.now(
             auction_id=auction_id, payer_company_id=payer_company_id, amount=amount, winning_bid_event_id=winning_bid_event_id,

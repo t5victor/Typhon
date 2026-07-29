@@ -3,6 +3,10 @@
 set -euo pipefail
 
 cd "${0:A:h}/.."
+if [[ "${THYPHON_ALLOW_DESTRUCTIVE_UPGRADE_TEST:-}" != "1" ]]; then
+  print -u2 "Refusing to truncate Thyphon data. Set THYPHON_ALLOW_DESTRUCTIVE_UPGRADE_TEST=1 only for an ephemeral test volume."
+  exit 64
+fi
 legacy_stream="legacy-upgrade-auction"
 legacy_event="00000000-0000-4000-8000-000000000005"
 legacy_settlement_stream="legacy-upgrade-settlement"
@@ -10,7 +14,8 @@ legacy_settlement_event="00000000-0000-4000-8000-000000000006"
 
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U thyphon -d thyphon <<SQL
 TRUNCATE transactional_outbox, command_receipt, event_stream_head, event_stream,
-  provider_reference_claim, settlement_causation_claim, projection_receipt, projection_failure;
+  provider_reference_claim, settlement_causation_claim, projection_receipt, projection_failure,
+  projection_raw_failure, projection_redrive_attempt;
 DELETE FROM schema_migration WHERE migration_id IN ('005_namespace_legacy_streams_and_outbox', '006_bind_idempotency_receipts_to_actor_and_tenant', '007_claim_each_winning_bid_once', '008_track_dlq_redrives');
 INSERT INTO event_stream(event_id, stream_id, stream_version, event_name, payload, occurred_at, schema_version, correlation_id)
 VALUES ('$legacy_event', '$legacy_stream', 1, 'AuctionOpened',

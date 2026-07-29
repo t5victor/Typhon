@@ -132,6 +132,20 @@ MIGRATIONS = {
       CREATE TABLE IF NOT EXISTS settlement_causation_claim (
         winning_bid_event_id UUID PRIMARY KEY, settlement_stream_id TEXT NOT NULL
       );
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT payload->>'winning_bid_event_id'
+          FROM event_stream
+          WHERE event_name='SettlementRequested'
+            AND payload ? 'winning_bid_event_id'
+            AND payload->>'winning_bid_event_id' IS NOT NULL
+          GROUP BY payload->>'winning_bid_event_id'
+          HAVING COUNT(*) > 1
+        ) THEN
+          RAISE EXCEPTION 'cannot claim winning bids: historic SettlementRequested events are duplicated';
+        END IF;
+      END $$;
       INSERT INTO settlement_causation_claim(winning_bid_event_id, settlement_stream_id)
       SELECT (payload->>'winning_bid_event_id')::UUID, stream_id
       FROM event_stream
@@ -144,6 +158,84 @@ MIGRATIONS = {
       ALTER TABLE projection_failure ADD COLUMN IF NOT EXISTS redriven_at TIMESTAMPTZ;
       ALTER TABLE projection_failure ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
       ALTER TABLE projection_failure ADD COLUMN IF NOT EXISTS redrive_count INTEGER NOT NULL DEFAULT 0;
+    """,
+    "009_validate_causality_and_redrive_outbox": """
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT payload->>'winning_bid_event_id'
+          FROM event_stream
+          WHERE event_name='SettlementRequested'
+            AND payload ? 'winning_bid_event_id'
+            AND payload->>'winning_bid_event_id' IS NOT NULL
+          GROUP BY payload->>'winning_bid_event_id'
+          HAVING COUNT(*) > 1
+        ) THEN
+          RAISE EXCEPTION 'cannot claim winning bids: historic SettlementRequested events are duplicated';
+        END IF;
+      END $$;
+      ALTER TABLE projection_failure ADD COLUMN IF NOT EXISTS active_redrive_attempt_id UUID;
+      CREATE TABLE IF NOT EXISTS projection_raw_failure (
+        consumer_name TEXT NOT NULL, topic TEXT NOT NULL, partition_id INTEGER NOT NULL,
+        message_offset BIGINT NOT NULL, raw_value BYTEA, attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL, quarantined_at TIMESTAMPTZ,
+        PRIMARY KEY (consumer_name, topic, partition_id, message_offset)
+      );
+      CREATE TABLE IF NOT EXISTS projection_redrive_attempt (
+        attempt_id UUID PRIMARY KEY, consumer_name TEXT NOT NULL, event_id UUID NOT NULL,
+        envelope JSONB NOT NULL, requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        published_at TIMESTAMPTZ, resolved_at TIMESTAMPTZ
+      );
+    """,
+    "010_bind_settlement_causality_to_winning_bid_facts": """
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1
+          FROM settlement_causation_claim c
+          LEFT JOIN event_stream w ON w.event_id=c.winning_bid_event_id
+          LEFT JOIN event_stream s ON s.stream_id=c.settlement_stream_id AND s.event_name='SettlementRequested'
+          WHERE w.event_id IS NULL
+             OR w.event_name <> 'WinningBidAccepted'
+             OR w.stream_id NOT LIKE 'auction:%'
+             OR s.event_id IS NULL
+             OR s.payload->>'auction_id' <> substring(w.stream_id FROM 9)
+             OR s.payload->>'payer_company_id' <> w.payload->>'company_id'
+             OR s.payload->>'amount' <> w.payload->>'accepted_offer'
+             OR s.payload->>'winning_bid_event_id' IS DISTINCT FROM c.winning_bid_event_id::TEXT
+        ) THEN
+          RAISE EXCEPTION 'cannot bind Settlement causality: an existing claim does not match a WinningBidAccepted fact';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname='settlement_causation_claim_winning_bid_event_id_fkey'
+        ) THEN
+          ALTER TABLE settlement_causation_claim
+          ADD CONSTRAINT settlement_causation_claim_winning_bid_event_id_fkey
+          FOREIGN KEY (winning_bid_event_id) REFERENCES event_stream(event_id);
+        END IF;
+      END $$;
+    """,
+    "011_verify_historic_settlement_causal_payload_binding": """
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1
+          FROM settlement_causation_claim c
+          LEFT JOIN event_stream w ON w.event_id=c.winning_bid_event_id
+          LEFT JOIN event_stream s ON s.stream_id=c.settlement_stream_id AND s.event_name='SettlementRequested'
+          WHERE w.event_id IS NULL
+             OR w.event_name <> 'WinningBidAccepted'
+             OR w.stream_id NOT LIKE 'auction:%'
+             OR s.event_id IS NULL
+             OR s.payload->>'auction_id' <> substring(w.stream_id FROM 9)
+             OR s.payload->>'payer_company_id' <> w.payload->>'company_id'
+             OR s.payload->>'amount' <> w.payload->>'accepted_offer'
+             OR s.payload->>'winning_bid_event_id' IS DISTINCT FROM c.winning_bid_event_id::TEXT
+        ) THEN
+          RAISE EXCEPTION 'cannot verify Settlement causality: a historic claim is not bound to its event payload';
+        END IF;
+      END $$;
     """,
 }
 

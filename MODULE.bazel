@@ -1,1 +1,9 @@
-module(name = "thyphon", version = "0.1.0")
+module(name = "thyphon", version = "0.3.0")
+
+# Bazel must execute the same Python major/minor declared by pyproject.toml
+# and configured in CI; do not silently fall back to the host toolchain.
+bazel_dep(name = "rules_python", version = "0.40.0")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(python_version = "3.13")
+use_repo(python, "python_3_13")

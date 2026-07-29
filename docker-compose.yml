@@ -24,7 +24,6 @@ services:
       dockerfile: Dockerfile.kafka
       pull: true
     image: thyphon-kafka:phase-2
-    ports: ["127.0.0.1:29092:9092"]
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -84,6 +83,17 @@ services:
   projection-worker:
     image: thyphon-api:phase-2
     command: ["python", "-m", "thyphon.workers.main", "projection"]
+    restart: unless-stopped
+    environment:
+      THYPHON_DATABASE_URL: postgresql://thyphon:thyphon@postgres:5432/thyphon
+      THYPHON_KAFKA_BOOTSTRAP: kafka:9092
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+  redrive-outbox-worker:
+    image: thyphon-api:phase-2
+    command: ["python", "-m", "thyphon.workers.main", "redrive-outbox"]
     restart: unless-stopped
     environment:
       THYPHON_DATABASE_URL: postgresql://thyphon:thyphon@postgres:5432/thyphon

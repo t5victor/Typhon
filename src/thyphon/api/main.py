@@ -26,7 +26,7 @@ from thyphon.settlement.domain.commands.complete_refund.command import CompleteR
 from thyphon.settlement.domain.commands.confirm_settlement.command import ConfirmSettlement
 from thyphon.settlement.domain.commands.fail_refund.command import FailRefund
 from thyphon.settlement.domain.commands.reject_settlement.command import RejectSettlement
-from thyphon.shared.domain import CommandContext, DomainViolation, IdempotencyKeyReused, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, SettlementAlreadyRequestedForWinningBid
+from thyphon.shared.domain import CommandContext, DomainViolation, IdempotencyKeyReused, InvalidSettlementCausation, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, SettlementAlreadyRequestedForWinningBid
 
 
 class OpenAuctionRequest(BaseModel):
@@ -69,8 +69,10 @@ def role_required(*allowed_roles: str):
             raise HTTPException(status_code=503, detail="API identity configuration is unavailable")
         try:
             entries = json.loads(raw_keys)
+            if not isinstance(entries, dict):
+                raise TypeError("API keys must be a JSON object")
             entry = None if x_api_key is None else entries.get(x_api_key)
-        except json.JSONDecodeError as error:
+        except (json.JSONDecodeError, AttributeError, TypeError) as error:
             raise HTTPException(status_code=503, detail="API identity configuration is invalid") from error
         if entry is None:
             raise HTTPException(status_code=401, detail="invalid API key")
@@ -128,7 +130,7 @@ def create_app() -> FastAPI:
     def execute(action):
         try:
             return action()
-        except (DomainViolation, ValueError) as error:
+        except (DomainViolation, InvalidSettlementCausation, ValueError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         except (OptimisticConcurrencyConflict, IdempotencyKeyReused, ProviderReferenceAlreadyObserved, SettlementAlreadyRequestedForWinningBid) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -156,7 +158,7 @@ def create_app() -> FastAPI:
             try:
                 from aiokafka import AIOKafkaProducer
                 producer = AIOKafkaProducer(
-                    bootstrap_servers=os.environ.get("THYPHON_KAFKA_BOOTSTRAP", "localhost:29092"), request_timeout_ms=2_000,
+                    bootstrap_servers=os.environ.get("THYPHON_KAFKA_BOOTSTRAP", "kafka:9092"), request_timeout_ms=2_000,
                 )
                 await producer.start()
                 await producer.stop()

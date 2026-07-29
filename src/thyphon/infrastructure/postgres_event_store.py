@@ -3,10 +3,59 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from contextlib import contextmanager
-from typing import Any, Iterator
+from dataclasses import dataclass
+from typing import Any, Iterator, Mapping
+from uuid import UUID
 
 from thyphon.infrastructure.sqlite_event_store import EVENT_SCHEMA_VERSIONS, EVENT_TYPES, _decode_value, upcast_event
-from thyphon.shared.domain import CommandContext, DomainEvent, IdempotencyKeyReused, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent, SettlementAlreadyRequestedForWinningBid
+from thyphon.shared.domain import CommandContext, DomainEvent, IdempotencyKeyReused, InvalidSettlementCausation, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent, SettlementAlreadyRequestedForWinningBid
+
+
+@dataclass(frozen=True)
+class CanonicalEvent:
+    """An event proved to be identical to its immutable Event Store record."""
+
+    recorded: RecordedEvent
+    correlation_id: str
+    causation_id: str | None
+    actor_id: str | None
+    tenant_id: str | None
+
+
+_ENVELOPE_FIELDS = frozenset({
+    "event_id", "event_name", "schema_version", "stream_id", "stream_version", "global_position",
+    "occurred_at", "payload", "correlation_id", "causation_id", "actor_id", "tenant_id",
+})
+
+
+def _require_envelope_shape(envelope: Mapping[str, Any]) -> UUID:
+    if set(envelope) != _ENVELOPE_FIELDS:
+        raise ValueError("domain-event envelope has an unknown or missing field")
+    try:
+        event_id = UUID(str(envelope["event_id"]))
+    except (TypeError, ValueError, KeyError) as error:
+        raise ValueError("domain-event envelope has an invalid event_id") from error
+    if (
+        not isinstance(envelope["event_name"], str)
+        or not isinstance(envelope["schema_version"], int) or isinstance(envelope["schema_version"], bool)
+        or not isinstance(envelope["stream_id"], str) or not envelope["stream_id"]
+        or not isinstance(envelope["stream_version"], int) or isinstance(envelope["stream_version"], bool) or envelope["stream_version"] < 1
+        or not isinstance(envelope["global_position"], int) or isinstance(envelope["global_position"], bool) or envelope["global_position"] < 1
+        or not isinstance(envelope["occurred_at"], str)
+        or not isinstance(envelope["payload"], dict)
+        or not isinstance(envelope["correlation_id"], str) or not envelope["correlation_id"]
+        or any(envelope[name] is not None and not isinstance(envelope[name], str) for name in ("causation_id", "actor_id", "tenant_id"))
+    ):
+        raise ValueError("domain-event envelope has invalid field types")
+    if envelope["payload"].get("event_id") != str(event_id):
+        raise ValueError("domain-event envelope event_id does not match its payload")
+    try:
+        occurred_at = datetime.fromisoformat(envelope["occurred_at"])
+    except ValueError as error:
+        raise ValueError("domain-event envelope has an invalid occurred_at") from error
+    if occurred_at.tzinfo is None:
+        raise ValueError("domain-event envelope occurred_at must include a timezone")
+    return event_id
 
 
 class PostgresEventStore:
@@ -51,6 +100,43 @@ class PostgresEventStore:
             rows = cursor.fetchall()
         return [self._recorded(*row) for row in rows]
 
+    def canonical_event(self, envelope: Mapping[str, Any]) -> CanonicalEvent:
+        """Reject broker input unless it exactly represents an Event Store fact.
+
+        Kafka is a delivery mechanism, not an authority able to mint financial
+        obligations. The process manager consumes only the canonical row.
+        """
+        event_id = _require_envelope_shape(envelope)
+        with self.connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT event_id, stream_id, stream_version, event_name, payload, global_position, schema_version, "
+                "occurred_at, correlation_id, causation_id, actor_id, tenant_id "
+                "FROM event_stream WHERE event_id=%s",
+                (event_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise ValueError("domain-event envelope is not present in the Event Store")
+        (
+            stored_id, stream_id, stream_version, event_name, payload, global_position, schema_version,
+            occurred_at, correlation_id, causation_id, actor_id, tenant_id,
+        ) = row
+        comparable = {
+            "event_id": str(stored_id), "event_name": event_name, "schema_version": int(schema_version),
+            "stream_id": stream_id, "stream_version": int(stream_version), "global_position": int(global_position),
+            "payload": payload, "correlation_id": correlation_id, "causation_id": causation_id,
+            "actor_id": actor_id, "tenant_id": tenant_id,
+        }
+        supplied = {key: envelope[key] for key in comparable}
+        if json.dumps(supplied, sort_keys=True, separators=(",", ":"), default=str) != json.dumps(comparable, sort_keys=True, separators=(",", ":"), default=str):
+            raise ValueError("domain-event envelope differs from its Event Store fact")
+        if datetime.fromisoformat(envelope["occurred_at"]) != occurred_at:
+            raise ValueError("domain-event envelope occurred_at differs from its Event Store fact")
+        recorded = self._recorded(stream_id, stream_version, event_name, payload, global_position, schema_version)
+        if recorded.event.event_id != event_id:
+            raise ValueError("Event Store payload event_id differs from its Event Store row")
+        return CanonicalEvent(recorded, correlation_id, causation_id, actor_id, tenant_id)
+
     def append(
         self, *, stream_id: str, expected_version: int, events: list[DomainEvent], idempotency_key: str,
         command_name: str, request_hash: str, context: CommandContext,
@@ -89,6 +175,18 @@ class PostgresEventStore:
             for event in events:
                 if event.event_name == "SettlementRequested":
                     winning_bid_event_id = str(event.payload()["winning_bid_event_id"])
+                    cursor.execute(
+                        "SELECT event_name, stream_id, payload FROM event_stream WHERE event_id=%s",
+                        (winning_bid_event_id,),
+                    )
+                    cause = cursor.fetchone()
+                    expected_auction_stream = f"auction:{event.payload()['auction_id']}"
+                    if (
+                        cause is None or cause[0] != "WinningBidAccepted" or cause[1] != expected_auction_stream
+                        or cause[2].get("company_id") != event.payload()["payer_company_id"]
+                        or cause[2].get("accepted_offer") != event.payload()["amount"]
+                    ):
+                        raise InvalidSettlementCausation("SettlementRequested must cite its Auction's canonical WinningBidAccepted event")
                     cursor.execute(
                         "INSERT INTO settlement_causation_claim(winning_bid_event_id, settlement_stream_id) VALUES (%s, %s) "
                         "ON CONFLICT (winning_bid_event_id) DO NOTHING RETURNING settlement_stream_id",

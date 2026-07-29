@@ -235,7 +235,9 @@ conflicto de idempotencia; no se degrada a `UniqueViolation` ni a un 500.
 
 `settlement_causation_claim` reserva globalmente un `winning_bid_event_id` para
 un único stream de Settlement. No depende solo del ID determinista usado por el
-worker: la propia persistencia impide dos Settlements para el mismo hecho.
+worker: la propia persistencia impide dos Settlements para el mismo hecho y una
+foreign key lo liga a `event_stream`. Antes de crear el claim, ambos adapters
+verifican tipo (`WinningBidAccepted`), stream de Auction, compañía y oferta.
 
 `provider_reference_claim` hace lo mismo para referencias de confirmación de
 proveedor entre Settlements.
@@ -292,15 +294,28 @@ Un evento que falla se intenta tres veces; después se registra en
 `projection_failure`, se publica en `thyphon.domain-events-dlq` y se avanza el
 offset para no bloquear toda la partición.
 
+Esto aplica solo a fallos deterministas de contrato, dominio o proyección. Un
+timeout, desconexión o agotamiento del pool es infraestructura transitoria: se
+aplica backoff exponencial, se reposiciona el consumer en el mismo offset y no
+se confirma el mensaje.
+
 El redrive no borra el historial ni marca éxito por adelantado:
 
 ```bash
 python -m thyphon.workers.redrive <event-id>
 ```
 
-Solo reinyecta el envelope y deja constancia de `redriven_at` y el contador. El
-worker marca `resolved_at` únicamente tras ejecutar con éxito su ruta normal.
-Los receipts siguen siendo la defensa final contra duplicados.
+Ese comando crea transaccionalmente una `projection_redrive_attempt` con un
+`attempt_id`; el redrive-outbox worker la publica después en Kafka con el ID en
+una cabecera. El consumidor resuelve exactamente ese intento solo tras ejecutar
+con éxito su ruta normal. Si la proyección de una subasta tenía un gap, el
+redrive reconstruye el stream completo desde el Event Store en orden canónico,
+en vez de reinyectar un evento antiguo aislado. La recepción del mensaje basta
+para considerar el intento publicable aunque el dispatcher aún no haya grabado
+`published_at`; evita una carrera entre el ACK de Kafka y ese update. Un
+duplicado de un intento ya resuelto se confirma como no-op, mientras que un ID
+desconocido o asociado a otro evento se pone en cuarentena. Los receipts se
+escriben solo después de una transición de proyección efectiva.
 
 ## 10. Query side y consistencia eventual
 
@@ -387,6 +402,7 @@ migrate           migraciones ordenadas antes de API/workers
 api               FastAPI
 outbox-worker     publicación fiable hacia Kafka
 projection-worker proyección y process manager
+redrive-outbox-worker publicación durable de intentos de redrive
 ```
 
 Los health checks representan dependencias reales: PostgreSQL debe aceptar
@@ -404,7 +420,7 @@ debe ejecutarse desde automatización sin que el operador lo haya decidido.
 | Capa | Ejemplos | Garantía |
 |---|---|---|
 | Dominio | subasta, Settlement, Company | Invariantes y Given/When/Then implícito en eventos. |
-| Contrato | envelope y schema version | Lectores y consumidores no pierden campos de trazabilidad. |
+| Contrato | envelope, schema version y canonicalización | Lectores rechazan schema inválido y broker input que no coincide con el Event Store. |
 | Nomenclatura | AST y estructura de carpetas | No se infiltra CRUD ni se agrupan comandos/eventos. |
 | TUI/simulación | render y mercado determinista | Presentación y reproducibilidad sin Docker. |
 | Integración PostgreSQL | `verify_postgres_concurrency.py` | Retries idénticos y conflicto entre actor/tenant/stream. |
@@ -435,7 +451,11 @@ ocurrido si no hay evidencia de una corrida concreta.
 | `SELECT ... FOR UPDATE` sin receipt | Carrera de idempotencia cuando no hay fila | Advisory lock por clave, relectura dentro de transacción. |
 | Conexión PostgreSQL compartida | Throughput bajo y transacciones mezcladas | `ConnectionPool`, checkout por operación y cierre explícito. |
 | Rebuild visible a medio camino | Queries con 404 o estado incompleto | Shadow table e intercambio transaccional. |
-| Poison event bloqueando consumo | Una partición deja de avanzar | Reintento acotado, DLQ, redrive y receipt idempotente. |
+| Poison event bloqueando consumo | Una partición deja de avanzar | Parsing completo dentro de la cuarentena, raw-DLQ para registros sin ID y redrive durable. |
+| Kafka como autoridad implícita | Un mensaje falsificado podía crear una obligación | Canonicalización contra PostgreSQL antes de proyección/process manager; Kafka no se expone al host. |
+| Receipt antes de transición | Un gap podía quedar marcado para siempre | Versiones consecutivas, receipt posterior y rebuild por stream durante redrive. |
+| Carrera ACK Kafka / `published_at` | Un redrive válido podía entrar en DLQ | El consumer bloquea y valida el intento activo sin prefiltrar por `published_at`; la entrega es la prueba de publicación. |
+| Duplicado de redrive resuelto | At-least-once creaba un poison event artificial | Un intento resuelto se reconoce como no-op y confirma el offset sin rebuild. |
 | HMAC sin vida útil | Replays temporales de callback | Timestamp firmado y ventana de cinco minutos. |
 | `.env` en build context | Exposición en builder/cache remoto | Exclusiones explícitas en `.dockerignore`. |
 | Simulación releyendo historial completo | Coste cuadrático en sesiones largas | Cursor por posición global y contador SQL. |
@@ -449,7 +469,7 @@ Estas no son deudas ocultas; delimitan conscientemente el alcance actual:
 - No hay envío, recepción, inventario, unidades o moneda múltiple.
 - No hay reasignación de un lote tras fallo de Settlement.
 - Los agentes son estrategias deterministas codificadas; no hay plugins ni IA.
-- Kafka se usa sin Schema Registry ni contratos externos versionados.
+- Kafka se usa sin Schema Registry ni contratos externos versionados; producción requerirá TLS/SASL y ACLs.
 - No hay métricas Prometheus, trazas OpenTelemetry ni dashboard Grafana.
 - No hay multi-tenancy real más allá de propagación/aislamiento de identidad.
 - No hay nonce durable de proveedor: el callback firmado es seguro por
@@ -468,6 +488,8 @@ Estas no son deudas ocultas; delimitan conscientemente el alcance actual:
       cuando la dependencia FastAPI esté declarada también para ese target Bazel.
 - [ ] Validar el upgrade sobre una copia anonimizada de un volumen real antiguo
       antes de usarlo fuera del laboratorio.
+- [ ] Añadir pruebas de integración que inyecten envelopes falsificados,
+      tombstones, JSON inválido, gaps y carreras del redrive-outbox.
 
 ### P1 — completar el modelo de asignación
 
@@ -502,6 +524,8 @@ Estas no son deudas ocultas; delimitan conscientemente el alcance actual:
 - [ ] Inventario, contratos de envío, clima y riesgo de proveedor.
 - [ ] Benchmark reproducible: concurrencia por recurso, duplicados, caída de
       consumidor, redrive, rebuild y medición de throughput/latencia.
+- [ ] Medir y ajustar el circuito de backoff ante indisponibilidad sostenida de
+      PostgreSQL/Kafka, incluyendo alertas y límites operativos.
 
 ## 18. Cómo leer el repositorio
 

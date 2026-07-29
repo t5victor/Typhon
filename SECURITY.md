@@ -5,4 +5,7 @@ Copy `.env.example` to a gitignored `.env`, replace its values, and use a manage
 local development. Provider callbacks require an HMAC over a canonical intention-bound body and a
 five-minute timestamp window. A production integration should additionally use the provider's nonce
 or event identifier as a durable replay key.
+Kafka has no host port in the local Compose topology, and its deliveries are treated as untrusted
+until they exactly match a PostgreSQL Event Store fact. A production deployment must additionally
+use TLS/SASL and producer/consumer ACLs; canonicalization is not a replacement for broker security.
 Report vulnerabilities privately to the maintainer.
