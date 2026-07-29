@@ -16,7 +16,7 @@ class SettlementCommandHandler:
     def request_settlement(self, command: RequestSettlement, context: CommandContext) -> int:
         command_name, request_hash = command_metadata(command)
         stream_id = stream_key("settlement", command.settlement_id)
-        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash)
+        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash, actor_id=context.actor_id, tenant_id=context.tenant_id)
         if receipt is not None:
             return receipt
         settlement = Settlement.rehydrate(stream_id, [])
@@ -44,7 +44,7 @@ class SettlementCommandHandler:
         stream_id = stream_key("settlement", settlement_id)
         idempotency_key = context.idempotency_key
         command_name, request_hash = command_metadata(command)
-        receipt = self.store.idempotency_result(idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash)
+        receipt = self.store.idempotency_result(idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash, actor_id=context.actor_id, tenant_id=context.tenant_id)
         if receipt is not None:
             return receipt
         stream = self.store.read_stream(stream_id)

@@ -21,7 +21,7 @@ from thyphon.settlement.domain.events.refund_failed.event import RefundFailed
 from thyphon.settlement.domain.events.settlement_confirmed.event import SettlementConfirmed
 from thyphon.settlement.domain.events.settlement_rejected.event import SettlementRejected
 from thyphon.settlement.domain.events.settlement_requested.event import SettlementRequested
-from thyphon.shared.domain import CommandContext, DomainEvent, IdempotencyKeyReused, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent
+from thyphon.shared.domain import CommandContext, DomainEvent, IdempotencyKeyReused, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent, SettlementAlreadyRequestedForWinningBid
 
 
 EVENT_TYPES: dict[str, type[DomainEvent]] = {
@@ -86,7 +86,7 @@ class SqliteEventStore:
             );
             CREATE TABLE IF NOT EXISTS command_receipt (
               idempotency_key TEXT PRIMARY KEY, stream_id TEXT NOT NULL, command_name TEXT NOT NULL,
-              request_hash TEXT NOT NULL, resulting_version INTEGER NOT NULL
+              request_hash TEXT NOT NULL, actor_id TEXT NOT NULL, tenant_id TEXT NOT NULL, resulting_version INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS transactional_outbox (
               event_id TEXT PRIMARY KEY, topic TEXT NOT NULL, partition_key TEXT NOT NULL,
@@ -103,6 +103,9 @@ class SqliteEventStore:
             CREATE TABLE IF NOT EXISTS provider_reference_claim (
               provider_reference TEXT PRIMARY KEY, settlement_stream_id TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS settlement_causation_claim (
+              winning_bid_event_id TEXT PRIMARY KEY, settlement_stream_id TEXT NOT NULL
+            );
             """
         )
         self.connection.commit()
@@ -113,13 +116,15 @@ class SqliteEventStore:
         ).fetchall()
         return [self._recorded(row) for row in rows]
 
-    def idempotency_result(self, idempotency_key: str, *, stream_id: str, command_name: str, request_hash: str) -> int | None:
+    def idempotency_result(self, idempotency_key: str, *, stream_id: str, command_name: str, request_hash: str, actor_id: str | None, tenant_id: str | None) -> int | None:
         receipt = self.connection.execute(
             "SELECT * FROM command_receipt WHERE idempotency_key = ?", (idempotency_key,)
         ).fetchone()
         if receipt is None:
             return None
-        if (receipt["stream_id"], receipt["command_name"], receipt["request_hash"]) != (stream_id, command_name, request_hash):
+        identity = actor_id or ""
+        tenant = tenant_id or ""
+        if (receipt["stream_id"], receipt["command_name"], receipt["request_hash"], receipt["actor_id"], receipt["tenant_id"]) != (stream_id, command_name, request_hash, identity, tenant):
             raise IdempotencyKeyReused("idempotency key was already used for a different command")
         return int(receipt["resulting_version"])
 
@@ -128,11 +133,22 @@ class SqliteEventStore:
             "SELECT * FROM event_stream ORDER BY global_position"
         )]
 
+    def events_after(self, global_position: int) -> list[RecordedEvent]:
+        rows = self.connection.execute(
+            "SELECT * FROM event_stream WHERE global_position > ? ORDER BY global_position", (global_position,)
+        ).fetchall()
+        return [self._recorded(row) for row in rows]
+
+    def event_count(self) -> int:
+        """Return telemetry without decoding the immutable event history."""
+        row = self.connection.execute("SELECT COUNT(*) FROM event_stream").fetchone()
+        return int(row[0])
+
     def append(self, *, stream_id: str, expected_version: int, events: list[DomainEvent], idempotency_key: str, command_name: str, request_hash: str, context: CommandContext) -> int:
         with self.connection:
             if not events:
                 raise ValueError("an append requires at least one domain event")
-            receipt = self.idempotency_result(idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash)
+            receipt = self.idempotency_result(idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash, actor_id=context.actor_id, tenant_id=context.tenant_id)
             if receipt is not None:
                 return receipt
             actual = self.connection.execute(
@@ -145,6 +161,18 @@ class SqliteEventStore:
                 )
             version = actual
             for event in events:
+                if event.event_name == "SettlementRequested":
+                    winning_bid_event_id = str(event.payload()["winning_bid_event_id"])
+                    self.connection.execute(
+                        "INSERT OR IGNORE INTO settlement_causation_claim VALUES (?, ?)",
+                        (winning_bid_event_id, stream_id),
+                    )
+                    claim = self.connection.execute(
+                        "SELECT settlement_stream_id FROM settlement_causation_claim WHERE winning_bid_event_id=?",
+                        (winning_bid_event_id,),
+                    ).fetchone()
+                    if claim is None or claim["settlement_stream_id"] != stream_id:
+                        raise SettlementAlreadyRequestedForWinningBid("winning bid already caused another settlement")
                 if event.event_name in {"SettlementConfirmed", "LateSettlementDetected"}:
                     provider_reference = str(event.payload()["provider_reference"])
                     self.connection.execute(
@@ -178,7 +206,8 @@ class SqliteEventStore:
                     (str(event.event_id), "thyphon.domain-events", stream_id, envelope),
                 )
             self.connection.execute(
-                "INSERT INTO command_receipt VALUES (?, ?, ?, ?, ?)", (idempotency_key, stream_id, command_name, request_hash, version)
+                "INSERT INTO command_receipt VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (idempotency_key, stream_id, command_name, request_hash, context.actor_id or "", context.tenant_id or "", version),
             )
             return version
 

@@ -53,30 +53,40 @@ done
 [[ "$settlement_count" == "1" ]]
 
 webhook_secret="$(sed -n 's/^THYPHON_PROVIDER_WEBHOOK_SECRET=//p' .env)"
+webhook_timestamp="$(date +%s)"
 signature() {
+  local timestamp="${4:-$webhook_timestamp}"
   THYPHON_PROVIDER_WEBHOOK_SECRET="$webhook_secret" python3 -c '
 import hashlib, hmac, json, os, sys
-print(hmac.new(os.environ["THYPHON_PROVIDER_WEBHOOK_SECRET"].encode(), json.dumps({"settlement_id": sys.argv[1], "intention": sys.argv[2], "idempotency_key": sys.argv[3], "payload": json.loads(sys.argv[4])}, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256).hexdigest())
-' "$settlement_id" "$1" "$2" "$3"
+print(hmac.new(os.environ["THYPHON_PROVIDER_WEBHOOK_SECRET"].encode(), json.dumps({"settlement_id": sys.argv[1], "intention": sys.argv[2], "idempotency_key": sys.argv[3], "timestamp": int(sys.argv[4]), "payload": json.loads(sys.argv[5])}, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256).hexdigest())
+' "$settlement_id" "$1" "$2" "$timestamp" "$3"
 }
 reject_payload='{"rejection_reason":"local funds release"}'
 reject_key="audit-reject-${auction_id}"
+bad_callback_payload='{"provider_reference":"invalid-provider-callback"}'
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${base}/commands/settlements/${settlement_id}/confirm" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: invalid-signature-${auction_id}" -H 'X-Thyphon-API-Key: local-payment-provider' \
+  -H "X-Thyphon-Timestamp: ${webhook_timestamp}" -H "X-Thyphon-Signature: $(printf '0%.0s' {1..64})" --data "$bad_callback_payload")" == "401" ]]
+expired_timestamp="$((webhook_timestamp - 301))"
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${base}/commands/settlements/${settlement_id}/confirm" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: expired-signature-${auction_id}" -H 'X-Thyphon-API-Key: local-payment-provider' \
+  -H "X-Thyphon-Timestamp: ${expired_timestamp}" -H "X-Thyphon-Signature: $(signature confirm-settlement "expired-signature-${auction_id}" "$bad_callback_payload" "$expired_timestamp")" --data "$bad_callback_payload")" == "401" ]]
 curl -fsS -X POST "${base}/commands/settlements/${settlement_id}/reject" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: ${reject_key}" -H 'X-Thyphon-API-Key: local-payment-provider' \
-  -H "X-Thyphon-Signature: $(signature reject-settlement "$reject_key" "$reject_payload")" --data "$reject_payload" | grep -q '"expected_version":2'
+  -H "X-Thyphon-Timestamp: ${webhook_timestamp}" -H "X-Thyphon-Signature: $(signature reject-settlement "$reject_key" "$reject_payload")" --data "$reject_payload" | grep -q '"expected_version":2'
 confirm_payload="{\"provider_reference\":\"late-local-provider-${auction_id}\"}"
 confirm_key="audit-late-${auction_id}"
 curl -fsS -X POST "${base}/commands/settlements/${settlement_id}/confirm" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: ${confirm_key}" -H 'X-Thyphon-API-Key: local-payment-provider' \
-  -H "X-Thyphon-Signature: $(signature confirm-settlement "$confirm_key" "$confirm_payload")" --data "$confirm_payload" | grep -q '"expected_version":4'
+  -H "X-Thyphon-Timestamp: ${webhook_timestamp}" -H "X-Thyphon-Signature: $(signature confirm-settlement "$confirm_key" "$confirm_payload")" --data "$confirm_payload" | grep -q '"expected_version":4'
 refund_key="audit-refund-${auction_id}"
 curl -fsS -X POST "${base}/commands/settlements/${settlement_id}/refund-completed" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: ${refund_key}" -H 'X-Thyphon-API-Key: local-payment-provider' \
-  -H "X-Thyphon-Signature: $(signature refund-completed "$refund_key" "$confirm_payload")" --data "$confirm_payload" | grep -q '"expected_version":5'
+  -H "X-Thyphon-Timestamp: ${webhook_timestamp}" -H "X-Thyphon-Signature: $(signature refund-completed "$refund_key" "$confirm_payload")" --data "$confirm_payload" | grep -q '"expected_version":5'
 repeat_key="audit-refund-repeat-${auction_id}"
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${base}/commands/settlements/${settlement_id}/refund-completed" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: ${repeat_key}" -H 'X-Thyphon-API-Key: local-payment-provider' \
-  -H "X-Thyphon-Signature: $(signature refund-completed "$repeat_key" "$confirm_payload")" --data "$confirm_payload")" == "422" ]]
+  -H "X-Thyphon-Timestamp: ${webhook_timestamp}" -H "X-Thyphon-Signature: $(signature refund-completed "$repeat_key" "$confirm_payload")" --data "$confirm_payload")" == "422" ]]
 
 docker compose exec -T api python -m thyphon.projections.rebuild | grep -q '^Rebuilt auction-overview from [1-9]'
 
@@ -84,4 +94,18 @@ metadata="$(docker compose exec -T postgres psql -U thyphon -d thyphon -Atc \
   "SELECT schema_version || ':' || correlation_id || ':' || global_position FROM event_stream WHERE stream_id='auction:${auction_id}'")"
 print -- "$metadata" | grep -q '^1:live-audit-correlation:[1-9]'
 
-print "Live verification passed: auth, PostgreSQL, Kafka readiness, outbox/projection/rebuild, envelopes, late settlement and one-time refund."
+# A quarantined record is only resolved after a successful normal consumer
+# pass. Re-enqueue an already projected AuctionOpened fact to exercise that
+# idempotent redrive workflow without changing market state.
+redrive_event="$(docker compose exec -T postgres psql -U thyphon -d thyphon -Atc "SELECT event_id FROM event_stream WHERE stream_id='auction:${auction_id}' ORDER BY stream_version LIMIT 1")"
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U thyphon -d thyphon -c \
+  "INSERT INTO projection_failure(consumer_name, event_id, attempts, last_error, quarantined_at) VALUES ('auction-overview-v1', '${redrive_event}', 3, 'integration redrive check', NOW()) ON CONFLICT (consumer_name, event_id) DO UPDATE SET attempts=3, last_error='integration redrive check', quarantined_at=NOW(), redriven_at=NULL, resolved_at=NULL"
+docker compose exec -T api python -m thyphon.workers.redrive "$redrive_event"
+for attempt in {1..30}; do
+  resolved="$(docker compose exec -T postgres psql -U thyphon -d thyphon -Atc "SELECT resolved_at IS NOT NULL FROM projection_failure WHERE consumer_name='auction-overview-v1' AND event_id='${redrive_event}'")"
+  [[ "$resolved" == "t" ]] && break
+  sleep 1
+done
+[[ "$resolved" == "t" ]]
+
+print "Live verification passed: auth, PostgreSQL, Kafka readiness, outbox/projection/rebuild, envelopes, late settlement, one-time refund and DLQ redrive."

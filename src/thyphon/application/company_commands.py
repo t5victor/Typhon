@@ -13,7 +13,7 @@ class CompanyCommandHandler:
     def onboard_company(self, command: OnboardCompany, context: CommandContext) -> int:
         command_name, request_hash = command_metadata(command)
         stream_id = stream_key("company", command.company_id)
-        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash)
+        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash, actor_id=context.actor_id, tenant_id=context.tenant_id)
         if receipt is not None:
             return receipt
         company = Company.rehydrate(stream_id, [])
@@ -27,7 +27,7 @@ class CompanyCommandHandler:
     def change_risk_appetite(self, command: ChangeRiskAppetite, context: CommandContext) -> int:
         command_name, request_hash = command_metadata(command)
         stream_id = stream_key("company", command.company_id)
-        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash)
+        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash, actor_id=context.actor_id, tenant_id=context.tenant_id)
         if receipt is not None:
             return receipt
         stream = self.store.read_stream(stream_id)

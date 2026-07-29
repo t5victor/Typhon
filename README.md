@@ -30,7 +30,7 @@ This delivery contains the complete auction path rather than a throwaway MVP:
 ## Run the deterministic terminal simulation
 
 ```bash
-bazel run //apps/tui -- --ticks 12 --seed 18374
+bazel run //apps:tui -- --ticks 12 --seed 18374
 bazel test //...
 ```
 
@@ -69,6 +69,8 @@ This reports a deterministic local command/event baseline; it is not presented a
 
 The Compose project is isolated as `thyphon-live`; it creates `thyphon-postgres:phase-2`,
 `thyphon-kafka:phase-2`, `thyphon-api:phase-2`, and its own `thyphon-live_thyphon-postgres-data` volume.
+The ordered migrations preserve legacy raw stream IDs by classifying and converting them to namespaced streams;
+they abort rather than silently merge histories if a target stream would collide.
 
 ## One-command launcher
 
@@ -88,6 +90,6 @@ ASCII TUI in a new macOS Terminal window. It preserves the isolated PostgreSQL v
 - Every consumer deduplicates by `(consumer_name, event_id)` and quarantines poison messages after bounded retries.
 - The event and outbox record are committed atomically.
 - Refunds are a two-step workflow: a late settlement requests one refund; only its completion/failure fact resolves it.
-- Event streams and outbox envelopes carry schema version, global position, correlation, causation, actor and tenant fields.
+- Event streams and outbox envelopes carry schema version, global position, correlation, causation, actor and tenant fields; idempotency receipts are bound to the actor and tenant that created them.
 
 See [docs/event-catalog.md](docs/event-catalog.md) and [docs/adr/0001-intention-led-event-sourcing.md](docs/adr/0001-intention-led-event-sourcing.md).

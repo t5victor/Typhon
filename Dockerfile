@@ -5,6 +5,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir ".[runtime]"
 COPY docs ./docs
+COPY scripts ./scripts
 RUN useradd --create-home --uid 10001 thyphon && chown -R thyphon:thyphon /app
 USER thyphon
 

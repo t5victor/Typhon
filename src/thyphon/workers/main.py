@@ -66,7 +66,8 @@ async def run_projection() -> None:
     bootstrap = os.environ["THYPHON_KAFKA_BOOTSTRAP"]
     dsn = os.environ["THYPHON_DATABASE_URL"]
     projector = PostgresAuctionOverviewProjector(dsn)
-    settlements = SettlementCommandHandler(PostgresEventStore(dsn))
+    settlement_store = PostgresEventStore(dsn)
+    settlements = SettlementCommandHandler(settlement_store)
     failure_store = psycopg.connect(dsn, autocommit=True)
     dlq_producer = producer_type(bootstrap_servers=bootstrap, acks="all")
     consumer = consumer_type(
@@ -125,6 +126,16 @@ async def run_projection() -> None:
                         "UPDATE projection_failure SET quarantined_at=NOW() WHERE consumer_name=%s AND event_id=%s",
                         (projector.consumer_name, envelope["event_id"]),
                     )
+            else:
+                # Redrive only records an intent to retry.  The event is
+                # resolved once this consumer has actually completed it.
+                with failure_store.transaction(), failure_store.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE projection_failure SET resolved_at=NOW() "
+                        "WHERE consumer_name=%s AND event_id=%s "
+                        "AND redriven_at IS NOT NULL AND resolved_at IS NULL",
+                        (projector.consumer_name, envelope["event_id"]),
+                    )
             with failure_store.transaction(), failure_store.cursor() as cursor:
                 cursor.execute(
                     "INSERT INTO process_checkpoint(process_name, last_observed_at) VALUES (%s, NOW()) "
@@ -136,6 +147,8 @@ async def run_projection() -> None:
         await consumer.stop()
         await dlq_producer.stop()
         failure_store.close()
+        settlement_store.close()
+        projector.close()
 
 
 def main() -> None:

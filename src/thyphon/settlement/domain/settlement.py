@@ -19,6 +19,7 @@ class Settlement:
     auction_id: str | None = None
     payer_company_id: str | None = None
     winning_bid_event_id: str | None = None
+    refund_provider_reference: str | None = None
     amount: Decimal = Decimal("0")
     lifecycle: str = "unrequested"
     version: int = 0
@@ -32,9 +33,9 @@ class Settlement:
             settlement.version += 1
         return settlement
 
-    def request(self, auction_id: str, payer_company_id: str, amount: Decimal, winning_bid_event_id: str | None) -> None:
-        if self.lifecycle != "unrequested" or amount <= 0:
-            raise DomainViolation("a settlement request must name a new positive-value obligation")
+    def request(self, auction_id: str, payer_company_id: str, amount: Decimal, winning_bid_event_id: str) -> None:
+        if self.lifecycle != "unrequested" or amount <= 0 or not winning_bid_event_id.strip():
+            raise DomainViolation("a settlement request must name a new positive-value obligation and its winning bid")
         self._record(SettlementRequested.now(
             auction_id=auction_id, payer_company_id=payer_company_id, amount=amount, winning_bid_event_id=winning_bid_event_id,
         ))
@@ -58,11 +59,15 @@ class Settlement:
     def complete_refund(self, provider_reference: str) -> None:
         if self.lifecycle != "refund_pending":
             raise DomainViolation("only a pending refund can be completed")
+        if provider_reference != self.refund_provider_reference:
+            raise DomainViolation("a refund outcome must name the provider reference that requested it")
         self._record(RefundCompleted.now(provider_reference=provider_reference))
 
     def fail_refund(self, provider_reference: str, failure_reason: str) -> None:
         if self.lifecycle != "refund_pending" or not failure_reason.strip():
             raise DomainViolation("only a pending refund can fail with a reason")
+        if provider_reference != self.refund_provider_reference:
+            raise DomainViolation("a refund outcome must name the provider reference that requested it")
         self._record(RefundFailed.now(
             provider_reference=provider_reference, failure_reason=failure_reason
         ))
@@ -91,7 +96,8 @@ class Settlement:
                 self.lifecycle = "rejected"
             case LateSettlementDetected():
                 pass
-            case RefundRequested():
+            case RefundRequested(provider_reference=provider_reference):
+                self.refund_provider_reference = provider_reference
                 self.lifecycle = "refund_pending"
             case RefundCompleted():
                 self.lifecycle = "refunded"

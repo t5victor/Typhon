@@ -24,6 +24,8 @@ CREATE TABLE command_receipt (
     stream_id TEXT NOT NULL,
     command_name TEXT NOT NULL,
     request_hash TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
     resulting_version BIGINT NOT NULL,
     accepted_at TIMESTAMPTZ NOT NULL
 );
@@ -58,6 +60,11 @@ CREATE TABLE provider_reference_claim (
     settlement_stream_id TEXT NOT NULL
 );
 
+CREATE TABLE settlement_causation_claim (
+    winning_bid_event_id UUID PRIMARY KEY,
+    settlement_stream_id TEXT NOT NULL
+);
+
 CREATE TABLE process_checkpoint (
     process_name TEXT PRIMARY KEY,
     last_observed_at TIMESTAMPTZ NOT NULL
@@ -69,5 +76,8 @@ CREATE TABLE projection_failure (
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT NOT NULL,
     quarantined_at TIMESTAMPTZ,
+    redriven_at TIMESTAMPTZ,
+    resolved_at TIMESTAMPTZ,
+    redrive_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (consumer_name, event_id)
 );

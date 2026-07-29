@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from thyphon.infrastructure.sqlite_event_store import EVENT_SCHEMA_VERSIONS, EVENT_TYPES, _decode_value, upcast_event
-from thyphon.shared.domain import CommandContext, DomainEvent, IdempotencyKeyReused, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent
+from thyphon.shared.domain import CommandContext, DomainEvent, IdempotencyKeyReused, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent, SettlementAlreadyRequestedForWinningBid
 
 
 class PostgresEventStore:
@@ -16,27 +17,33 @@ class PostgresEventStore:
 
     def __init__(self, connection_string: str) -> None:
         try:
-            import psycopg
+            from psycopg_pool import ConnectionPool
         except ImportError as error:  # pragma: no cover - exercised by runtime setup
             raise RuntimeError("Install Thyphon with the 'runtime' extra for PostgreSQL support") from error
-        # Read-side lookups must not accidentally hold an outer transaction open.
-        # Atomic appends still use the explicit `connection.transaction()` block below.
-        self.connection = psycopg.connect(connection_string, autocommit=True)
+        self.pool = ConnectionPool(conninfo=connection_string, min_size=1, max_size=12, open=True)
 
-    def idempotency_result(self, idempotency_key: str, *, stream_id: str, command_name: str, request_hash: str) -> int | None:
-        with self.connection.cursor() as cursor:
+    @contextmanager
+    def connection(self) -> Iterator[Any]:
+        with self.pool.connection() as connection:
+            yield connection
+
+    def close(self) -> None:
+        self.pool.close()
+
+    def idempotency_result(self, idempotency_key: str, *, stream_id: str, command_name: str, request_hash: str, actor_id: str | None, tenant_id: str | None) -> int | None:
+        with self.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT stream_id, command_name, request_hash, resulting_version FROM command_receipt WHERE idempotency_key = %s", (idempotency_key,)
+                "SELECT stream_id, command_name, request_hash, actor_id, tenant_id, resulting_version FROM command_receipt WHERE idempotency_key = %s", (idempotency_key,)
             )
             row = cursor.fetchone()
         if row is None:
             return None
-        if tuple(row[:3]) != (stream_id, command_name, request_hash):
+        if tuple(row[:5]) != (stream_id, command_name, request_hash, actor_id or "", tenant_id or ""):
             raise IdempotencyKeyReused("idempotency key was already used for a different command")
-        return int(row[3])
+        return int(row[5])
 
     def read_stream(self, stream_id: str) -> list[RecordedEvent]:
-        with self.connection.cursor() as cursor:
+        with self.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT stream_id, stream_version, event_name, payload, global_position, schema_version FROM event_stream "
                 "WHERE stream_id = %s ORDER BY stream_version", (stream_id,)
@@ -48,16 +55,19 @@ class PostgresEventStore:
         self, *, stream_id: str, expected_version: int, events: list[DomainEvent], idempotency_key: str,
         command_name: str, request_hash: str, context: CommandContext,
     ) -> int:
-        with self.connection.transaction(), self.connection.cursor() as cursor:
+        with self.connection() as connection, connection.transaction(), connection.cursor() as cursor:
+            # A key-level advisory lock closes the no-row race before receipt
+            # insertion. It serializes identical retries across every stream.
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (idempotency_key,))
             cursor.execute(
-                "SELECT stream_id, command_name, request_hash, resulting_version FROM command_receipt WHERE idempotency_key = %s FOR UPDATE",
+                "SELECT stream_id, command_name, request_hash, actor_id, tenant_id, resulting_version FROM command_receipt WHERE idempotency_key = %s FOR UPDATE",
                 (idempotency_key,),
             )
             receipt = cursor.fetchone()
             if receipt is not None:
-                if tuple(receipt[:3]) != (stream_id, command_name, request_hash):
+                if tuple(receipt[:5]) != (stream_id, command_name, request_hash, context.actor_id or "", context.tenant_id or ""):
                     raise IdempotencyKeyReused("idempotency key was already used for a different command")
-                return int(receipt[3])
+                return int(receipt[5])
             if not events:
                 raise ValueError("an append requires at least one domain event")
             # A dedicated head row serializes a stream without taking broad table locks or leaking raw unique errors.
@@ -77,6 +87,22 @@ class PostgresEventStore:
                 )
             version = actual_version
             for event in events:
+                if event.event_name == "SettlementRequested":
+                    winning_bid_event_id = str(event.payload()["winning_bid_event_id"])
+                    cursor.execute(
+                        "INSERT INTO settlement_causation_claim(winning_bid_event_id, settlement_stream_id) VALUES (%s, %s) "
+                        "ON CONFLICT (winning_bid_event_id) DO NOTHING RETURNING settlement_stream_id",
+                        (winning_bid_event_id, stream_id),
+                    )
+                    claim = cursor.fetchone()
+                    if claim is None:
+                        cursor.execute(
+                            "SELECT settlement_stream_id FROM settlement_causation_claim WHERE winning_bid_event_id=%s",
+                            (winning_bid_event_id,),
+                        )
+                        owner = cursor.fetchone()
+                        if owner is None or owner[0] != stream_id:
+                            raise SettlementAlreadyRequestedForWinningBid("winning bid already caused another settlement")
                 if event.event_name in {"SettlementConfirmed", "LateSettlementDetected"}:
                     provider_reference = str(event.payload()["provider_reference"])
                     cursor.execute(
@@ -122,9 +148,9 @@ class PostgresEventStore:
                 (version, stream_id),
             )
             cursor.execute(
-                "INSERT INTO command_receipt(idempotency_key, stream_id, command_name, request_hash, resulting_version, accepted_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (idempotency_key, stream_id, command_name, request_hash, version, datetime.now(UTC)),
+                "INSERT INTO command_receipt(idempotency_key, stream_id, command_name, request_hash, actor_id, tenant_id, resulting_version, accepted_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (idempotency_key, stream_id, command_name, request_hash, context.actor_id or "", context.tenant_id or "", version, datetime.now(UTC)),
             )
             return version
 

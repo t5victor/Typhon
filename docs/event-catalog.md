@@ -16,4 +16,6 @@
 
 The catalog rejects mechanical CRUD titles. `Created`, `Updated`, `Deleted`, `SetStatus`, and `StatusChanged` are prohibited because they hide the business decision or fact being represented.
 
-Event envelopes have a schema version and a global position. `SettlementRequested` is currently v2; the reader upcasts v1 records by preserving the unknown causal event as `null`. Rebuild is an administrative command: `python -m thyphon.projections.rebuild`.
+Event envelopes have a schema version and a global position. `SettlementRequested` is currently v2; the reader upcasts v1 records by preserving the unknown causal event as `null`, while new `RequestSettlement` intentions require the causal winning-bid ID. A winning-bid ID is globally claimed by one Settlement stream. Rebuild is an administrative command: `python -m thyphon.projections.rebuild`.
+
+Quarantined projection events are inspected and redriven manually after their cause is fixed: `python -m thyphon.workers.redrive <event-id>`. Redrive records the re-enqueue attempt; the worker marks the failure resolved only after its normal idempotent projection and process-manager path succeeds. The projection receipt remains the final duplicate guard.

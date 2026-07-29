@@ -53,6 +53,12 @@ services:
       THYPHON_DATABASE_URL: postgresql://thyphon:thyphon@postgres:5432/thyphon
       THYPHON_KAFKA_BOOTSTRAP: kafka:9092
     ports: ["127.0.0.1:18000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }

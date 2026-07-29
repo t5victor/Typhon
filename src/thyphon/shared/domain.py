@@ -25,6 +25,10 @@ class ProviderReferenceAlreadyObserved(Exception):
     """A payment-provider reference is globally bound to a previous settlement."""
 
 
+class SettlementAlreadyRequestedForWinningBid(Exception):
+    """A winning bid can cause one and only one settlement stream."""
+
+
 @dataclass(frozen=True)
 class CommandContext:
     """Delivery metadata kept outside the domain intention.
@@ -112,7 +116,10 @@ class EventSourcedAggregate(Protocol):
 class EventStore(Protocol):
     def read_stream(self, stream_id: str) -> list[RecordedEvent]: ...
 
-    def idempotency_result(self, idempotency_key: str, *, stream_id: str, command_name: str, request_hash: str) -> int | None: ...
+    def idempotency_result(
+        self, idempotency_key: str, *, stream_id: str, command_name: str, request_hash: str,
+        actor_id: str | None, tenant_id: str | None,
+    ) -> int | None: ...
 
     def append(
         self,

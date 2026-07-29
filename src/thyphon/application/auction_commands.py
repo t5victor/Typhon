@@ -15,7 +15,7 @@ class AuctionCommandHandler:
     def open_auction(self, command: OpenAuction, context: CommandContext) -> int:
         command_name, request_hash = command_metadata(command)
         stream_id = stream_key("auction", command.auction_id)
-        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash)
+        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash, actor_id=context.actor_id, tenant_id=context.tenant_id)
         if receipt is not None:
             return receipt
         auction = Auction.rehydrate(stream_id, [])
@@ -31,7 +31,7 @@ class AuctionCommandHandler:
     def place_competitive_bid(self, command: PlaceCompetitiveBid, context: CommandContext) -> int:
         command_name, request_hash = command_metadata(command)
         stream_id = stream_key("auction", command.auction_id)
-        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash)
+        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash, actor_id=context.actor_id, tenant_id=context.tenant_id)
         if receipt is not None:
             return receipt
         stream = self.store.read_stream(stream_id)
@@ -49,7 +49,7 @@ class AuctionCommandHandler:
     def accept_winning_bid(self, command: AcceptWinningBid, context: CommandContext) -> int:
         command_name, request_hash = command_metadata(command)
         stream_id = stream_key("auction", command.auction_id)
-        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash)
+        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash, actor_id=context.actor_id, tenant_id=context.tenant_id)
         if receipt is not None:
             return receipt
         stream = self.store.read_stream(stream_id)
@@ -66,7 +66,7 @@ class AuctionCommandHandler:
     def expire_auction(self, command: ExpireAuction, context: CommandContext) -> int:
         command_name, request_hash = command_metadata(command)
         stream_id = stream_key("auction", command.auction_id)
-        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash)
+        receipt = self.store.idempotency_result(context.idempotency_key, stream_id=stream_id, command_name=command_name, request_hash=request_hash, actor_id=context.actor_id, tenant_id=context.tenant_id)
         if receipt is not None:
             return receipt
         stream = self.store.read_stream(stream_id)

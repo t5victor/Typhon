@@ -40,7 +40,7 @@ class DeterministicMarket:
         self.projector = AuctionOverviewProjector(self.store)
         self.tape: list[MarketTick] = []
         self._published: list[tuple[str, str, bytes]] = []
-        self._projected_events = 0
+        self._projected_position = 0
         self.random = Random(seed)
         self.tick = 0
         self.started = False
@@ -105,9 +105,9 @@ class DeterministicMarket:
         dispatcher.deliver_pending(duplicate_first=duplicate_first)
         # The projector is idempotent, but scanning the complete history every
         # tick is unnecessary and makes a long-running TUI quadratic.
-        for event in self.store.all_events()[self._projected_events:]:
+        for event in self.store.events_after(self._projected_position):
             self.projector.apply(event)
-            self._projected_events += 1
+            self._projected_position = event.global_position or self._projected_position
 
     def _context(self, suffix: str) -> CommandContext:
         return CommandContext(

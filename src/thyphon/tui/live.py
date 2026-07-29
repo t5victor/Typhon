@@ -92,7 +92,7 @@ def _auction_panel(screen, market: DeterministicMarket, top: int, left: int, wid
 
 def _system_panel(screen, market: DeterministicMarket, top: int, left: int, width: int, interval: float, paused: bool) -> None:
     _box(screen, top, left, 8, width, "OPERATIONS", Colour.AMBER)
-    events = len(market.store.all_events())
+    events = market.store.event_count()
     rows = (
         ("SIMULATION", "PAUSED" if paused else "RUNNING", Colour.AMBER if paused else Colour.POSITIVE),
         ("TICK RATE", f"{1 / interval:4.1f}/sec", Colour.ACCENT),

@@ -3,28 +3,30 @@ name: verify
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, master]
 
 jobs:
   bazel:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.13'
-      - uses: bazelbuild/setup-bazelisk@v3
+      - uses: bazelbuild/setup-bazelisk@3ef8fb47c52d50981880b1897fc18d2a1fb05abe # v3.0.0
       - run: bazel test //...
-      - run: pip install '.[dev]'
+      - run: pip install '.[runtime,dev]'
       - run: ruff check src
       - run: pyright
 
   integration:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - run: cp .env.example .env
       - run: docker compose up -d --build --wait
+      - run: zsh scripts/verify_legacy_upgrade.zsh
+      - run: docker compose exec -T api python scripts/verify_postgres_concurrency.py
       - run: ./scripts/verify_live.zsh
       - if: always()
         run: docker compose logs --no-color
