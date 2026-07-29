@@ -25,15 +25,31 @@ class ProviderReferenceAlreadyObserved(Exception):
     """A payment-provider reference is globally bound to a previous settlement."""
 
 
+@dataclass(frozen=True)
+class CommandContext:
+    """Delivery metadata kept outside the domain intention.
+
+    The command describes *what* a business actor wants.  Retry, tracing and
+    tenancy describe how that intention arrived and must never become part of
+    a domain fact's payload.
+    """
+
+    idempotency_key: str
+    correlation_id: str
+    causation_id: str | None = None
+    actor_id: str | None = None
+    tenant_id: str | None = None
+
+
 def command_metadata(command: Any) -> tuple[str, str]:
-    """Stable content fingerprint, excluding only the transport retry key itself."""
+    """Stable content fingerprint for a domain intention only."""
     def encode(value: Any) -> Any:
         if isinstance(value, Decimal):
             return str(value)
         if isinstance(value, datetime):
             return value.isoformat()
         return value
-    payload = {key: encode(value) for key, value in asdict(command).items() if key != "idempotency_key"}
+    payload = {key: encode(value) for key, value in asdict(command).items()}
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return type(command).__name__, hashlib.sha256(encoded.encode()).hexdigest()
 
@@ -82,6 +98,8 @@ class RecordedEvent:
     stream_id: str
     stream_version: int
     event: DomainEvent
+    global_position: int | None = None
+    schema_version: int = 1
 
 
 class EventSourcedAggregate(Protocol):
@@ -105,4 +123,5 @@ class EventStore(Protocol):
         idempotency_key: str,
         command_name: str,
         request_hash: str,
+        context: CommandContext,
     ) -> int: ...

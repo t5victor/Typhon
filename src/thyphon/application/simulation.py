@@ -10,7 +10,7 @@ from thyphon.auction.domain.commands.place_competitive_bid.command import PlaceC
 from thyphon.infrastructure.kafka_outbox_dispatcher import KafkaOutboxDispatcher
 from thyphon.infrastructure.sqlite_event_store import SqliteEventStore
 from thyphon.projections.auction_overview import AuctionOverviewProjector
-from thyphon.shared.domain import DomainViolation
+from thyphon.shared.domain import CommandContext, DomainViolation
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,7 @@ class DeterministicMarket:
         self.projector = AuctionOverviewProjector(self.store)
         self.tape: list[MarketTick] = []
         self._published: list[tuple[str, str, bytes]] = []
+        self._projected_events = 0
         self.random = Random(seed)
         self.tick = 0
         self.started = False
@@ -69,8 +70,8 @@ class DeterministicMarket:
             return
         self.commands.open_auction(OpenAuction(
             auction_id="auction-lithium-381", resource="Lithium", quantity=1200,
-            reserve_price=Decimal("212.00"), idempotency_key=f"seed:{self.seed}:open",
-        ))
+            reserve_price=Decimal("212.00"),
+        ), self._context("open"))
         self.started = True
         self._flush_events(duplicate_first=True)
 
@@ -78,16 +79,14 @@ class DeterministicMarket:
         self.bootstrap()
         self.tick += 1
         self._move_prices()
-        companies = ("Astra Industries", "Helios Dynamics", "Nova Corp", "Blue Horizon")
-        company = companies[self.random.randrange(len(companies))]
+        company = self._select_company()
         overview = self.projector.overview("auction-lithium-381")
         current_offer = Decimal(overview["leading_offer"] or overview["reserve_price"])
         offer = current_offer + Decimal(self.random.randint(1, 7))
         try:
             self.commands.place_competitive_bid(PlaceCompetitiveBid(
                 auction_id="auction-lithium-381", company_id=company, offer=offer,
-                idempotency_key=f"seed:{self.seed}:tick:{self.tick}",
-            ))
+            ), self._context(f"tick:{self.tick}"))
             outcome = "COMPETITIVE BID ACCEPTED"
         except DomainViolation as error:
             outcome = f"REJECTED: {error}"
@@ -104,8 +103,29 @@ class DeterministicMarket:
             self.store, lambda topic, key, body: self._published.append((topic, key, body))
         )
         dispatcher.deliver_pending(duplicate_first=duplicate_first)
-        for event in self.store.all_events():
+        # The projector is idempotent, but scanning the complete history every
+        # tick is unnecessary and makes a long-running TUI quadratic.
+        for event in self.store.all_events()[self._projected_events:]:
             self.projector.apply(event)
+            self._projected_events += 1
+
+    def _context(self, suffix: str) -> CommandContext:
+        return CommandContext(
+            idempotency_key=f"seed:{self.seed}:{suffix}", correlation_id=f"simulation:{self.seed}", actor_id="market-simulator",
+        )
+
+    def _select_company(self) -> str:
+        """Strategy and appetite materially affect who enters the auction."""
+        candidates: list[str] = []
+        for name, pulse in self.companies.items():
+            appetite = pulse.risk
+            if pulse.strategy == "VALUE" and self.last_moves["Lithium"] > Decimal("1.0"):
+                appetite /= Decimal("2")
+            if pulse.strategy == "MOMENTUM" and self.last_moves["Lithium"] > 0:
+                appetite += Decimal("0.15")
+            if self.random.random() < float(min(Decimal("0.95"), appetite)):
+                candidates.append(name)
+        return candidates[self.random.randrange(len(candidates))] if candidates else "Nova Corp"
 
     def _move_prices(self) -> None:
         for resource, price in self.prices.items():

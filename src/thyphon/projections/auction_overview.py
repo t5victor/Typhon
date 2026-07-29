@@ -24,6 +24,8 @@ class AuctionOverviewProjector:
                     "INSERT INTO projection_receipt VALUES (?, ?)",
                     (self.consumer_name, str(recorded.event.event_id)),
                 )
+                if not recorded.stream_id.startswith("auction:"):
+                    return True
                 auction_id = aggregate_id(recorded.stream_id, "auction")
                 match recorded.event:
                     case AuctionOpened(resource=resource, quantity=quantity, reserve_price=reserve):
@@ -59,7 +61,7 @@ class AuctionOverviewProjector:
             self.store.connection.execute(
                 "DELETE FROM projection_receipt WHERE consumer_name=?", (self.consumer_name,)
             )
-        all_events = self.store.all_events()
+        all_events = [event for event in self.store.all_events() if event.stream_id.startswith("auction:")]
         for recorded in all_events:
             self.apply(recorded)
         return len(all_events)

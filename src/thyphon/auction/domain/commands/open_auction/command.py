@@ -8,4 +8,3 @@ class OpenAuction:
     resource: str
     quantity: int
     reserve_price: Decimal
-    idempotency_key: str

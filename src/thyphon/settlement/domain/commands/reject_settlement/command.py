@@ -5,4 +5,3 @@ from dataclasses import dataclass
 class RejectSettlement:
     settlement_id: str
     rejection_reason: str
-    idempotency_key: str

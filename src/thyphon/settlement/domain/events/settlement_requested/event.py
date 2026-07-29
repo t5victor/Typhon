@@ -9,3 +9,4 @@ class SettlementRequested(DomainEvent):
     auction_id: str
     payer_company_id: str
     amount: Decimal
+    winning_bid_event_id: str | None

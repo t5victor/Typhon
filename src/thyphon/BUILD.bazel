@@ -42,6 +42,13 @@ py_test(
 )
 
 py_test(
+    name = "event_contract_tests",
+    srcs = ["shared/tests/test_event_contract.py"],
+    main = "shared/tests/test_event_contract.py",
+    deps = [":core"],
+)
+
+py_test(
     name = "company_domain_tests",
     srcs = ["company/domain/tests/test_company.py"],
     main = "company/domain/tests/test_company.py",

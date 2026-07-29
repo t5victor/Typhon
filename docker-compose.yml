@@ -48,10 +48,12 @@ services:
       pull: true
     image: thyphon-api:phase-2
     command: ["uvicorn", "thyphon.api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: .env
     environment:
       THYPHON_DATABASE_URL: postgresql://thyphon:thyphon@postgres:5432/thyphon
-      THYPHON_API_KEYS: '{"local-supplier":{"actor_id":"nordic-mining","role":"supplier"},"local-bidder-nova":{"actor_id":"nova-corp","role":"bidder"},"local-operator":{"actor_id":"thyphon-operator","role":"operator"},"local-payment-provider":{"actor_id":"payment-simulator","role":"payment-provider"}}'
+      THYPHON_KAFKA_BOOTSTRAP: kafka:9092
     ports: ["127.0.0.1:18000:8000"]
+    restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
@@ -65,6 +67,7 @@ services:
   outbox-worker:
     image: thyphon-api:phase-2
     command: ["python", "-m", "thyphon.workers.main", "outbox"]
+    restart: unless-stopped
     environment:
       THYPHON_DATABASE_URL: postgresql://thyphon:thyphon@postgres:5432/thyphon
       THYPHON_KAFKA_BOOTSTRAP: kafka:9092
@@ -75,6 +78,7 @@ services:
   projection-worker:
     image: thyphon-api:phase-2
     command: ["python", "-m", "thyphon.workers.main", "projection"]
+    restart: unless-stopped
     environment:
       THYPHON_DATABASE_URL: postgresql://thyphon:thyphon@postgres:5432/thyphon
       THYPHON_KAFKA_BOOTSTRAP: kafka:9092

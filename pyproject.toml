@@ -5,8 +5,18 @@ description = "Thyphon event-sourced commodity allocation exchange"
 requires-python = ">=3.13"
 
 [project.optional-dependencies]
-runtime = ["fastapi>=0.116", "uvicorn>=0.35", "psycopg[binary]>=3.2", "aiokafka>=0.12"]
-dev = ["ruff>=0.12", "pyright>=1.1"]
+runtime = ["fastapi==0.141.1", "uvicorn==0.52.0", "psycopg[binary]==3.3.4", "aiokafka==0.14.0"]
+dev = ["ruff==0.15.1", "pyright==1.1.408"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.pyright]
+pythonVersion = "3.13"
+include = ["src"]
+exclude = ["**/__pycache__"]
+reportMissingImports = false
 
 [project.scripts]
 thyphon = "thyphon.tui.main:main"
@@ -17,10 +27,3 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.ruff]
-line-length = 100
-
-[tool.pyright]
-pythonVersion = "3.13"
-typeCheckingMode = "strict"

@@ -14,11 +14,10 @@ class KafkaOutboxDispatcher:
 
     def deliver_pending(self, duplicate_first: bool = False) -> int:
         delivered = 0
-        for record in self.store.unpublished_events():
-            body = str(record.event.payload()).encode()
-            self.publish("thyphon.domain-events", record.stream_id, body)
+        for topic, partition_key, event_id, body in self.store.unpublished_outbox():
+            self.publish(topic, partition_key, body)
             if duplicate_first and delivered == 0:
-                self.publish("thyphon.domain-events", record.stream_id, body)
-            self.store.mark_published(record.event.event_id)
+                self.publish(topic, partition_key, body)
+            self.store.mark_published(event_id)
             delivered += 1
         return delivered

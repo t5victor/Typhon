@@ -1,11 +1,22 @@
 CREATE TABLE event_stream (
     event_id UUID PRIMARY KEY,
+    global_position BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
     stream_id TEXT NOT NULL,
     stream_version BIGINT NOT NULL,
     event_name TEXT NOT NULL,
     payload JSONB NOT NULL,
     occurred_at TIMESTAMPTZ NOT NULL,
+    schema_version SMALLINT NOT NULL DEFAULT 1,
+    correlation_id TEXT NOT NULL,
+    causation_id TEXT,
+    actor_id TEXT,
+    tenant_id TEXT,
     UNIQUE(stream_id, stream_version)
+);
+
+CREATE TABLE event_stream_head (
+    stream_id TEXT PRIMARY KEY,
+    current_version BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE command_receipt (
@@ -50,4 +61,13 @@ CREATE TABLE provider_reference_claim (
 CREATE TABLE process_checkpoint (
     process_name TEXT PRIMARY KEY,
     last_observed_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE projection_failure (
+    consumer_name TEXT NOT NULL,
+    event_id UUID NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL,
+    quarantined_at TIMESTAMPTZ,
+    PRIMARY KEY (consumer_name, event_id)
 );

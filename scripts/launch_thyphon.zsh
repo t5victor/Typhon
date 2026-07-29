@@ -33,5 +33,5 @@ print "\nOpening the Thyphon ASCII operations console in a new terminal..."
 if [[ "$OSTYPE" == darwin* ]]; then
   open -a Terminal "$REPO_ROOT/scripts/run_tui.command"
 else
-  print -u2 "Open a terminal and run: cd ${(q)REPO_ROOT} && bazel run //apps:tui -- --ticks 12 --seed 18374"
+  print -u2 "Open a terminal and run: cd ${(q)REPO_ROOT} && ./scripts/run_tui.command"
 fi

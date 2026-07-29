@@ -6,4 +6,3 @@ from datetime import datetime
 class ExpireAuction:
     auction_id: str
     expired_at: datetime
-    idempotency_key: str

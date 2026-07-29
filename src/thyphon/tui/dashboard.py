@@ -78,7 +78,7 @@ def render(market: DeterministicMarket, width: int | None = None, colour: bool =
         f"Offer        {(overview['leading_offer'] or '-'):>12} EUR",
     ), Ink.green)
     health_panel = Panel("SYSTEM HEALTH", (
-        f"Kafka        {Ink.green}READY{Ink.reset}",
+        "Runtime      local simulator",
         f"Events       {len(market.store.all_events()):>4}",
         f"Messages     {len(market._published):>4}",
         "Projection   idempotent",
@@ -87,7 +87,7 @@ def render(market: DeterministicMarket, width: int | None = None, colour: bool =
         f" {tick.index:03d}  {tick.company_name[:18]:<18} {tick.outcome:<26} {tick.offer:>7.2f} EUR"
         for tick in market.tape[-6:][::-1]
     ]
-    tape = panel(Panel("MARKET TAPE :: IMMUTABLE FACTS", tuple(tape_lines), Ink.cyan), width)
+    tape = panel(Panel("SIMULATION TAPE :: DERIVED ACTIVITY", tuple(tape_lines), Ink.cyan), width)
     footer = [
         Ink.cyan + "+" + line + "+" + Ink.reset,
         "|" + fit(" LIVE SIMULATION :: prices, agents and event stream update every tick  [Ctrl+C] stop", width - 2) + "|",

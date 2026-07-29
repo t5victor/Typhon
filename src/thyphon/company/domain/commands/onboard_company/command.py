@@ -8,4 +8,3 @@ class OnboardCompany:
     display_name: str
     opening_capital: Decimal
     risk_appetite: Decimal
-    idempotency_key: str

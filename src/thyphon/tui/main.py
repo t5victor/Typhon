@@ -10,7 +10,7 @@ from thyphon.tui.live import run as run_live
 
 def parser() -> argparse.ArgumentParser:
     parsed = argparse.ArgumentParser(prog="Thyphon", description="Thyphon ASCII market operations console")
-    parsed.add_argument("--ticks", type=int, default=40)
+    parsed.add_argument("--ticks", type=int, default=None, help="stop after this many ticks; omitted means run until Q")
     parsed.add_argument("--seed", type=int, default=18374)
     parsed.add_argument("--interval", type=float, default=0.25, help="seconds between live simulation ticks")
     parsed.add_argument("--snapshot", action="store_true", help="render once after all ticks instead of animating")
@@ -22,7 +22,7 @@ def main() -> None:
     args = parser().parse_args()
     market = DeterministicMarket(args.seed)
     if args.snapshot:
-        market.run(args.ticks)
+        market.run(args.ticks if args.ticks is not None else 40)
         print(render(market, colour=not args.plain))
         return
     try:

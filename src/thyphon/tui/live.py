@@ -97,8 +97,8 @@ def _system_panel(screen, market: DeterministicMarket, top: int, left: int, widt
         ("SIMULATION", "PAUSED" if paused else "RUNNING", Colour.AMBER if paused else Colour.POSITIVE),
         ("TICK RATE", f"{1 / interval:4.1f}/sec", Colour.ACCENT),
         ("EVENTS", f"{events:>8}", Colour.FRAME),
-        ("KAFKA OUTBOX", f"{len(market._published):>5} sent", Colour.POSITIVE),
-        ("PROJECTION", "caught up", Colour.POSITIVE),
+        ("LOCAL OUTBOX", f"{len(market._published):>5} sent", Colour.POSITIVE),
+        ("SIM PROJECTION", "caught up", Colour.POSITIVE),
     )
     for offset, (label, value, colour) in enumerate(rows, start=1):
         _add(screen, top + offset, left + 2, f"{label:<13}")
@@ -117,7 +117,7 @@ def _companies_panel(screen, market: DeterministicMarket, top: int, left: int, w
 
 
 def _tape_panel(screen, market: DeterministicMarket, top: int, left: int, width: int, height: int) -> None:
-    _box(screen, top, left, height, width, "EVENT TAPE :: IMMUTABLE FACTS", Colour.FRAME)
+    _box(screen, top, left, height, width, "SIMULATION TAPE :: DERIVED ACTIVITY", Colour.FRAME)
     capacity = max(1, height - 2)
     for offset, tick in enumerate(market.tape[-capacity:][::-1], start=1):
         _add(screen, top + offset, left + 2,
@@ -142,11 +142,37 @@ def _draw(screen, market: DeterministicMarket, interval: float, paused: bool) ->
     _system_panel(screen, market, 2, 6 + 2 * third, width - (8 + 2 * third), interval, paused)
     _companies_panel(screen, market, 11, 2, width - 4)
     _tape_panel(screen, market, 20, 2, width - 4, height - 23)
-    _add(screen, height - 2, 2, "[SPACE] pause/resume  [+/-] speed  [R] restart seed  [Q] quit", Colour.FRAME, True)
+    _add(screen, height - 2, 2, "[SPACE] pause/resume  [+/-] speed  [R] restart  [N] new seed  [Q] quit", Colour.FRAME, True)
     screen.refresh()
 
 
-def run(screen, market: DeterministicMarket, ticks: int, interval: float) -> None:
+def _request_seed(screen, current_seed: int) -> int | None:
+    """Read a new deterministic seed without leaving the curses console."""
+    height, width = screen.getmaxyx()
+    prompt = f"New seed (current {current_seed}, Enter cancels): "
+    _add(screen, height - 2, 2, " " * max(0, width - 4), Colour.AMBER)
+    _add(screen, height - 2, 2, prompt, Colour.AMBER, True)
+    screen.refresh()
+    try:
+        curses.curs_set(1)
+        curses.echo()
+        screen.nodelay(False)
+        raw = screen.getstr(height - 2, min(width - 2, len(prompt) + 2), 24).decode().strip()
+    except curses.error:
+        return None
+    finally:
+        curses.noecho()
+        curses.curs_set(0)
+        screen.nodelay(True)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def run(screen, market: DeterministicMarket, ticks: int | None, interval: float) -> None:
     curses.curs_set(0)
     screen.nodelay(True)
     screen.keypad(True)
@@ -155,7 +181,7 @@ def run(screen, market: DeterministicMarket, ticks: int, interval: float) -> Non
     paused = False
     deadline = monotonic()
     completed = 0
-    while completed < ticks:
+    while ticks is None or completed < ticks:
         key = screen.getch()
         if key in (ord("q"), ord("Q")):
             return
@@ -169,6 +195,12 @@ def run(screen, market: DeterministicMarket, ticks: int, interval: float) -> Non
             market = DeterministicMarket(market.seed)
             market.bootstrap()
             completed = 0
+        elif key in (ord("n"), ord("N")):
+            requested_seed = _request_seed(screen, market.seed)
+            if requested_seed is not None:
+                market = DeterministicMarket(requested_seed)
+                market.bootstrap()
+                completed = 0
         now = monotonic()
         if not paused and now >= deadline:
             market.advance()

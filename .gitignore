@@ -5,3 +5,6 @@ __pycache__/
 .pyright/
 bazel-*
 .thyphon/
+.env
+build/
+*.egg-info/

@@ -10,5 +10,23 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
       - uses: bazelbuild/setup-bazelisk@v3
       - run: bazel test //...
+      - run: pip install '.[dev]'
+      - run: ruff check src
+      - run: pyright
+
+  integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: docker compose up -d --build --wait
+      - run: ./scripts/verify_live.zsh
+      - if: always()
+        run: docker compose logs --no-color
+      - if: always()
+        run: docker compose down --remove-orphans

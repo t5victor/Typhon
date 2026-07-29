@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,7 +21,7 @@ from thyphon.settlement.domain.events.refund_failed.event import RefundFailed
 from thyphon.settlement.domain.events.settlement_confirmed.event import SettlementConfirmed
 from thyphon.settlement.domain.events.settlement_rejected.event import SettlementRejected
 from thyphon.settlement.domain.events.settlement_requested.event import SettlementRequested
-from thyphon.shared.domain import DomainEvent, IdempotencyKeyReused, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent
+from thyphon.shared.domain import CommandContext, DomainEvent, IdempotencyKeyReused, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, RecordedEvent
 
 
 EVENT_TYPES: dict[str, type[DomainEvent]] = {
@@ -33,6 +32,25 @@ EVENT_TYPES: dict[str, type[DomainEvent]] = {
         RefundCompleted, RefundFailed,
     )
 }
+
+# Event names are the public contract.  Evolution is explicit and readers can
+# upcast historic payloads before creating a current domain event.
+EVENT_SCHEMA_VERSIONS: dict[str, int] = {name: 1 for name in EVENT_TYPES}
+EVENT_SCHEMA_VERSIONS["SettlementRequested"] = 2
+
+
+def upcast_event(event_name: str, schema_version: int, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    if event_name not in EVENT_TYPES:
+        raise ValueError(f"unsupported event contract: {event_name}")
+    current = EVENT_SCHEMA_VERSIONS[event_name]
+    if schema_version > current:
+        raise ValueError(f"{event_name} v{schema_version} is newer than this reader")
+    if event_name == "SettlementRequested" and schema_version == 1:
+        # v1 was emitted before process causality was stored in the fact.  It
+        # remains replayable, with the absence recorded explicitly.
+        return current, {**payload, "winning_bid_event_id": None}
+    # Future migrations are registered here as pure vN -> vN+1 transforms.
+    return current, payload
 
 
 def _decode_value(name: str, value: Any) -> Any:
@@ -59,8 +77,11 @@ class SqliteEventStore:
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS event_stream (
-              event_id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, stream_version INTEGER NOT NULL,
+              global_position INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
+              stream_id TEXT NOT NULL, stream_version INTEGER NOT NULL,
               event_name TEXT NOT NULL, payload TEXT NOT NULL, occurred_at TEXT NOT NULL,
+              schema_version INTEGER NOT NULL DEFAULT 1,
+              correlation_id TEXT NOT NULL, causation_id TEXT, actor_id TEXT, tenant_id TEXT,
               UNIQUE(stream_id, stream_version)
             );
             CREATE TABLE IF NOT EXISTS command_receipt (
@@ -104,10 +125,10 @@ class SqliteEventStore:
 
     def all_events(self) -> list[RecordedEvent]:
         return [self._recorded(row) for row in self.connection.execute(
-            "SELECT * FROM event_stream ORDER BY occurred_at, event_id"
+            "SELECT * FROM event_stream ORDER BY global_position"
         )]
 
-    def append(self, *, stream_id: str, expected_version: int, events: list[DomainEvent], idempotency_key: str, command_name: str, request_hash: str) -> int:
+    def append(self, *, stream_id: str, expected_version: int, events: list[DomainEvent], idempotency_key: str, command_name: str, request_hash: str, context: CommandContext) -> int:
         with self.connection:
             if not events:
                 raise ValueError("an append requires at least one domain event")
@@ -126,25 +147,35 @@ class SqliteEventStore:
             for event in events:
                 if event.event_name in {"SettlementConfirmed", "LateSettlementDetected"}:
                     provider_reference = str(event.payload()["provider_reference"])
-                    claim = self.connection.execute(
-                        "SELECT settlement_stream_id FROM provider_reference_claim WHERE provider_reference=?",
-                        (provider_reference,),
-                    ).fetchone()
-                    if claim is not None and claim["settlement_stream_id"] != stream_id:
-                        raise ProviderReferenceAlreadyObserved("provider reference belongs to another settlement")
                     self.connection.execute(
                         "INSERT OR IGNORE INTO provider_reference_claim VALUES (?, ?)",
                         (provider_reference, stream_id),
                     )
+                    claim = self.connection.execute(
+                        "SELECT settlement_stream_id FROM provider_reference_claim WHERE provider_reference=?",
+                        (provider_reference,),
+                    ).fetchone()
+                    if claim is None or claim["settlement_stream_id"] != stream_id:
+                        raise ProviderReferenceAlreadyObserved("provider reference belongs to another settlement")
                 version += 1
                 body = json.dumps(event.payload(), sort_keys=True)
                 self.connection.execute(
-                    "INSERT INTO event_stream VALUES (?, ?, ?, ?, ?, ?)",
-                    (str(event.event_id), stream_id, version, event.event_name, body, event.occurred_at.isoformat()),
+                    "INSERT INTO event_stream(event_id, stream_id, stream_version, event_name, payload, occurred_at, schema_version, correlation_id, causation_id, actor_id, tenant_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(event.event_id), stream_id, version, event.event_name, body, event.occurred_at.isoformat(),
+                     EVENT_SCHEMA_VERSIONS[event.event_name], context.correlation_id, context.causation_id, context.actor_id, context.tenant_id),
                 )
+                position = self.connection.execute("SELECT global_position FROM event_stream WHERE event_id=?", (str(event.event_id),)).fetchone()[0]
+                envelope = json.dumps({
+                    "event_id": str(event.event_id), "event_name": event.event_name, "schema_version": EVENT_SCHEMA_VERSIONS[event.event_name],
+                    "stream_id": stream_id, "stream_version": version, "global_position": position,
+                    "occurred_at": event.occurred_at.isoformat(), "payload": event.payload(),
+                    "correlation_id": context.correlation_id, "causation_id": context.causation_id,
+                    "actor_id": context.actor_id, "tenant_id": context.tenant_id,
+                }, sort_keys=True)
                 self.connection.execute(
                     "INSERT INTO transactional_outbox VALUES (?, ?, ?, ?, NULL)",
-                    (str(event.event_id), "thyphon.domain-events", stream_id, body),
+                    (str(event.event_id), "thyphon.domain-events", stream_id, envelope),
                 )
             self.connection.execute(
                 "INSERT INTO command_receipt VALUES (?, ?, ?, ?, ?)", (idempotency_key, stream_id, command_name, request_hash, version)
@@ -158,6 +189,13 @@ class SqliteEventStore:
         ).fetchall()
         return [self._recorded(row) for row in rows]
 
+    def unpublished_outbox(self) -> list[tuple[str, str, UUID, bytes]]:
+        rows = self.connection.execute(
+            "SELECT o.topic, o.partition_key, o.event_id, o.body FROM transactional_outbox o "
+            "JOIN event_stream e ON e.event_id=o.event_id WHERE o.published_at IS NULL ORDER BY e.global_position"
+        ).fetchall()
+        return [(row["topic"], row["partition_key"], UUID(row["event_id"]), row["body"].encode()) for row in rows]
+
     def mark_published(self, event_id: UUID) -> None:
         self.connection.execute(
             "UPDATE transactional_outbox SET published_at = ? WHERE event_id = ?",
@@ -168,5 +206,6 @@ class SqliteEventStore:
     def _recorded(self, row: sqlite3.Row) -> RecordedEvent:
         event_type = EVENT_TYPES[row["event_name"]]
         raw = json.loads(row["payload"])
+        schema_version, raw = upcast_event(row["event_name"], int(row["schema_version"]), raw)
         event = event_type(**{key: _decode_value(key, value) for key, value in raw.items()})
-        return RecordedEvent(row["stream_id"], int(row["stream_version"]), event)
+        return RecordedEvent(row["stream_id"], int(row["stream_version"]), event, int(row["global_position"]), schema_version)

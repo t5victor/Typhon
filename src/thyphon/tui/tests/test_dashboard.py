@@ -11,7 +11,7 @@ class DashboardPresentation(unittest.TestCase):
         screen = render(market, width=96, colour=False)
         self.assertNotIn("\x1b[", screen)
         self.assertIn("THYPHON :: MARKET OPERATIONS", screen)
-        self.assertIn("MARKET TAPE :: IMMUTABLE FACTS", screen)
+        self.assertIn("SIMULATION TAPE :: DERIVED ACTIVITY", screen)
         self.assertTrue(all(len(line) == 96 for line in screen.splitlines()))
 
 

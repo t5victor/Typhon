@@ -5,4 +5,3 @@ from dataclasses import dataclass
 class ConfirmSettlement:
     settlement_id: str
     provider_reference: str
-    idempotency_key: str

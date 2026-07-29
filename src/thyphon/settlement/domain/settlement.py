@@ -18,6 +18,7 @@ class Settlement:
     stream_id: str
     auction_id: str | None = None
     payer_company_id: str | None = None
+    winning_bid_event_id: str | None = None
     amount: Decimal = Decimal("0")
     lifecycle: str = "unrequested"
     version: int = 0
@@ -31,11 +32,11 @@ class Settlement:
             settlement.version += 1
         return settlement
 
-    def request(self, auction_id: str, payer_company_id: str, amount: Decimal) -> None:
+    def request(self, auction_id: str, payer_company_id: str, amount: Decimal, winning_bid_event_id: str | None) -> None:
         if self.lifecycle != "unrequested" or amount <= 0:
             raise DomainViolation("a settlement request must name a new positive-value obligation")
         self._record(SettlementRequested.now(
-            auction_id=auction_id, payer_company_id=payer_company_id, amount=amount
+            auction_id=auction_id, payer_company_id=payer_company_id, amount=amount, winning_bid_event_id=winning_bid_event_id,
         ))
 
     def confirm(self, provider_reference: str) -> None:
@@ -81,7 +82,8 @@ class Settlement:
 
     def _apply(self, event: DomainEvent) -> None:
         match event:
-            case SettlementRequested(auction_id=auction_id, payer_company_id=payer, amount=amount):
+            case SettlementRequested(auction_id=auction_id, payer_company_id=payer, amount=amount, winning_bid_event_id=winning_bid_event_id):
+                self.winning_bid_event_id = winning_bid_event_id
                 self.auction_id, self.payer_company_id, self.amount, self.lifecycle = auction_id, payer, amount, "requested"
             case SettlementConfirmed():
                 self.lifecycle = "confirmed"

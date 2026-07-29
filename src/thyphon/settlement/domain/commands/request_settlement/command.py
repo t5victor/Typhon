@@ -8,4 +8,4 @@ class RequestSettlement:
     auction_id: str
     payer_company_id: str
     amount: Decimal
-    idempotency_key: str
+    winning_bid_event_id: str | None = None

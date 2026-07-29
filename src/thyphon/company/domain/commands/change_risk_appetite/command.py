@@ -6,4 +6,3 @@ from decimal import Decimal
 class ChangeRiskAppetite:
     company_id: str
     new_appetite: Decimal
-    idempotency_key: str

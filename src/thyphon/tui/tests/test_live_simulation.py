@@ -1,4 +1,3 @@
-from decimal import Decimal
 import unittest
 
 from thyphon.application.simulation import DeterministicMarket
