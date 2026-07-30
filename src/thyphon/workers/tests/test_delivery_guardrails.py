@@ -11,6 +11,7 @@ from thyphon.workers.main import (
     _dead_letter_preview,
     _parse_envelope,
     _redrive_attempt_id,
+    _redrive_target,
     _redrive_delivery_requires_rebuild,
 )
 
@@ -57,6 +58,14 @@ class DeliveryGuardrails(unittest.TestCase):
     def test_invalid_redrive_header_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             _redrive_attempt_id([("thyphon-redrive-attempt", b"invalid")])
+
+    def test_redrive_target_is_decoded_independently_from_the_attempt_id(self) -> None:
+        self.assertEqual(
+            "auction-overview-v1",
+            _redrive_target([("thyphon-redrive-consumer", b"auction-overview-v1")]),
+        )
+        with self.assertRaises(ValueError):
+            _redrive_target([("thyphon-redrive-consumer", b"")])
 
     def test_transient_infrastructure_errors_are_not_contract_poison(self) -> None:
         self.assertTrue(_is_infrastructure_error(TimeoutError("pool temporarily exhausted")))

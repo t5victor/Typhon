@@ -130,7 +130,7 @@ async def run_redrive_outbox() -> None:
                     connection = psycopg.connect(dsn, row_factory=psycopg.rows.dict_row, autocommit=True)
                 with connection.transaction(), connection.cursor() as cursor:
                     cursor.execute(
-                        "SELECT attempt_id, envelope FROM projection_redrive_attempt WHERE status='pending' "
+                        "SELECT attempt_id, consumer_name, envelope FROM projection_redrive_attempt WHERE status='pending' "
                         "ORDER BY requested_at LIMIT 50 FOR UPDATE SKIP LOCKED"
                     )
                     pending = cursor.fetchall()
@@ -139,7 +139,10 @@ async def run_redrive_outbox() -> None:
                         await producer.send_and_wait(
                             "thyphon.domain-events", key=envelope["stream_id"].encode(),
                             value=json.dumps(envelope, sort_keys=True).encode(),
-                            headers=[("thyphon-redrive-attempt", str(attempt["attempt_id"]).encode())],
+                            headers=[
+                                ("thyphon-redrive-attempt", str(attempt["attempt_id"]).encode()),
+                                ("thyphon-redrive-consumer", attempt["consumer_name"].encode()),
+                            ],
                         )
                         cursor.execute(
                             "UPDATE projection_redrive_attempt SET published_at=NOW(), status='published' "
@@ -225,6 +228,19 @@ def _redrive_attempt_id(headers: list[tuple[str, bytes]] | None) -> UUID | None:
                 return UUID(value.decode())
             except (AttributeError, UnicodeDecodeError, ValueError) as error:
                 raise ValueError("Kafka redrive attempt header is invalid") from error
+    return None
+
+
+def _redrive_target(headers: list[tuple[str, bytes]] | None) -> str | None:
+    for name, value in headers or []:
+        if name == "thyphon-redrive-consumer":
+            try:
+                target = value.decode()
+            except (AttributeError, UnicodeDecodeError) as error:
+                raise ValueError("Kafka redrive consumer header is invalid") from error
+            if not target:
+                raise ValueError("Kafka redrive consumer header is invalid")
+            return target
     return None
 
 
@@ -389,6 +405,7 @@ async def run_projection() -> None:
     bootstrap = os.environ["THYPHON_KAFKA_BOOTSTRAP"]
     dsn = os.environ["THYPHON_DATABASE_URL"]
     projector = PostgresAuctionOverviewProjector(dsn)
+    event_store = PostgresEventStore(dsn)
     failure_pool: Any = ConnectionPool(conninfo=dsn, min_size=1, max_size=4, kwargs={"autocommit": True}, open=True)
     consumer = consumer_type(
         "thyphon.domain-events", bootstrap_servers=bootstrap, group_id="thyphon-auction-overview-v1",
@@ -410,11 +427,17 @@ async def run_projection() -> None:
                 envelope = _parse_envelope(message.value)
                 candidate_event_id = _event_id_or_none(envelope)
                 redrive_attempt = _redrive_attempt_id(message.headers)
+                redrive_target = _redrive_target(message.headers)
+                if redrive_attempt is not None and redrive_target != projector.consumer_name:
+                    # Every consumer group receives the topic. A repair for a
+                    # different group is an ordinary at-least-once delivery,
+                    # not a failed local redrive attempt.
+                    redrive_attempt = None
                 for attempt in range(1, 4):
                     try:
                         # The broker supplies delivery only. This lookup rejects
                         # forged, altered and payload/metadata-divergent records.
-                        canonical = settlement_store.canonical_event(envelope)
+                        canonical = event_store.canonical_event(envelope)
                         recorded = canonical.recorded
                         canonical_event_id = recorded.event.event_id
                         if redrive_attempt is not None and recorded.stream_id.startswith("auction:"):
@@ -504,6 +527,7 @@ async def run_projection() -> None:
         await heartbeat_task
         await consumer.stop()
         failure_pool.close()
+        event_store.close()
         projector.close()
 
 
@@ -545,6 +569,9 @@ async def run_settlement_process_manager() -> None:
                 envelope = _parse_envelope(message.value)
                 candidate_event_id = _event_id_or_none(envelope)
                 redrive_attempt = _redrive_attempt_id(message.headers)
+                redrive_target = _redrive_target(message.headers)
+                if redrive_attempt is not None and redrive_target != consumer_name:
+                    redrive_attempt = None
                 for attempt in range(1, 4):
                     try:
                         canonical = settlement_store.canonical_event(envelope)

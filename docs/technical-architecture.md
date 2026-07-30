@@ -213,7 +213,9 @@ projection_redrive_attempt carries operator, reason, lifecycle and last error.
 A partial unique index permits one pending or published attempt per failure.
 Repeating a request returns the active attempt instead of creating an orphan. A
 terminal duplicate delivery is a no-op; an unknown or mismatched attempt is
-quarantined.
+quarantined. Redrive records carry their intended consumer, so another consumer
+group receives them as ordinary idempotent delivery instead of attempting a
+foreign repair.
 
 The command defaults to `auction-overview-v1`. Set
 `THYPHON_REDRIVE_CONSUMER=settlement-process-manager-v1` when repairing the
