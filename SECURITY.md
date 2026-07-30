@@ -1,11 +1,18 @@
-# Security policy
+# Security
 
-Thyphon is a local laboratory. Do not expose its Compose ports or use real payment credentials.
-Copy `.env.example` to a gitignored `.env`, replace its values, and use a managed secret store outside
-local development. Provider callbacks require an HMAC over a canonical intention-bound body and a
-five-minute timestamp window. A production integration should additionally use the provider's nonce
-or event identifier as a durable replay key.
-Kafka has no host port in the local Compose topology, and its deliveries are treated as untrusted
-until they exactly match a PostgreSQL Event Store fact. A production deployment must additionally
-use TLS/SASL and producer/consumer ACLs; canonicalization is not a replacement for broker security.
-Report vulnerabilities privately to the maintainer.
+Thyphon is a local systems laboratory. Do not expose its Compose ports or use
+production payment credentials, broker credentials or API keys.
+
+Local configuration belongs in an untracked `.env` file. Keep it in a managed
+secret store outside the workstation when sharing access. Payment callbacks use
+an HMAC over the canonical command body and a five-minute timestamp window; a
+production provider integration also needs a durable nonce or provider event ID
+to prevent long-lived replay.
+
+Kafka records are treated as delivery input, not as authority. Consumers verify
+each envelope against PostgreSQL before projecting it or starting Settlement.
+Production deployments still require TLS/SASL, ACLs, separate database roles
+and infrastructure-level network controls.
+
+Report vulnerabilities privately to the maintainer. Do not open a public issue
+with exploit details or credentials.

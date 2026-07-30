@@ -1,9 +1,22 @@
-# ADR 0001: use intention-led event sourcing for competitive allocation
+# ADR 0001: event sourcing for competitive allocation
+
+## Context
+
+Auctions create the kinds of conflicts that are easy to hide behind mutable
+rows: two bidders can race for the same lot, a payment can arrive late and a
+read model can lag behind the accepted decision. The history matters when that
+happens.
 
 ## Decision
 
-Thyphon records append-only domain facts. Commands are named for a business decision and events for a business fact. No snapshots are used: every aggregate is rehydrated from its complete stream.
+Record append-only business facts. Commands name the decision being requested;
+events name the fact that occurred. Rehydrate aggregates from their complete
+stream and keep projections outside the decision path. Thyphon does not use
+snapshots.
 
 ## Consequences
 
-The audit trail is direct. Rebuild is guarded by the same PostgreSQL advisory lock used by the live projector, so it cannot race a live projection write; it replays the globally ordered event log and remains intentionally an operational action, not a public API endpoint. Long-running streams will eventually make rehydration costly; this is an accepted, measurable constraint rather than a hidden optimization. Command handlers enforce optimistic versions and never read projections to decide legality.
+The audit trail can be replayed and read models can be rebuilt. PostgreSQL
+enforces optimistic stream versions while the outbox carries accepted facts to
+Kafka. Rehydration cost grows with stream length; that cost is visible and will
+be measured before introducing a different design.

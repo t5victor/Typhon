@@ -78,7 +78,7 @@ def role_required(*allowed_roles: str):
             raise HTTPException(status_code=401, detail="invalid API key")
         try:
             principal = Principal(
-                actor_id=entry["actor_id"], role=entry["role"], tenant_id=entry.get("tenant_id", "local-lab"),
+                actor_id=entry["actor_id"], role=entry["role"], tenant_id=entry.get("tenant_id", "default"),
             )
         except (AttributeError, KeyError, TypeError) as error:
             raise HTTPException(status_code=503, detail="API identity configuration is invalid") from error

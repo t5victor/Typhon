@@ -23,7 +23,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: cp .env.example .env
+      - run: |
+          printf '%s\n' \
+            'THYPHON_API_KEYS={"ci-supplier":{"actor_id":"supplier","role":"supplier","tenant_id":"ci"},"ci-bidder":{"actor_id":"nova","role":"bidder","tenant_id":"ci"},"ci-operator":{"actor_id":"operator","role":"operator","tenant_id":"ci"},"ci-payment-provider":{"actor_id":"payment-simulator","role":"payment-provider","tenant_id":"ci"}}' \
+            'THYPHON_PROVIDER_WEBHOOK_SECRET=ci-only-webhook-secret' \
+            'THYPHON_TEST_SUPPLIER_KEY=ci-supplier' \
+            'THYPHON_TEST_BIDDER_KEY=ci-bidder' \
+            'THYPHON_TEST_OPERATOR_KEY=ci-operator' \
+            'THYPHON_TEST_PAYMENT_PROVIDER_KEY=ci-payment-provider' > .env
       - run: docker compose build postgres api
       - run: docker compose up -d --wait postgres
       - run: THYPHON_ALLOW_DESTRUCTIVE_UPGRADE_TEST=1 zsh scripts/verify_legacy_upgrade.zsh

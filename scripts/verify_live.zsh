@@ -3,7 +3,20 @@ set -euo pipefail
 
 cd "${0:A:h}/.."
 if [[ ! -f .env ]]; then
-  print -u2 "Missing .env. Copy .env.example and replace its local values first."
+  print -u2 "Missing .env. Create local configuration before running the live verification."
+  exit 1
+fi
+
+env_value() {
+  sed -n "s/^${1}=//p" .env | tail -n 1
+}
+
+supplier_key="$(env_value THYPHON_TEST_SUPPLIER_KEY)"
+bidder_key="$(env_value THYPHON_TEST_BIDDER_KEY)"
+operator_key="$(env_value THYPHON_TEST_OPERATOR_KEY)"
+payment_provider_key="$(env_value THYPHON_TEST_PAYMENT_PROVIDER_KEY)"
+if [[ -z "$supplier_key" || -z "$bidder_key" || -z "$operator_key" || -z "$payment_provider_key" ]]; then
+  print -u2 "Missing THYPHON_TEST_* API key names in .env."
   exit 1
 fi
 
@@ -23,17 +36,17 @@ open_key="audit-open-${auction_id}"
 
 opened="$(curl -fsS -X POST "${base}/commands/auctions/open" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: ${open_key}" \
-  -H 'X-Thyphon-API-Key: local-supplier' \
+  -H "X-Thyphon-API-Key: ${supplier_key}" \
   -H 'X-Correlation-ID: live-audit-correlation' \
   --data "{\"auction_id\":\"${auction_id}\",\"resource\":\"Gold\",\"quantity\":2,\"reserve_price\":\"100.00\"}")"
 print -- "$opened" | grep -q '"expected_version":1'
 
 curl -fsS -X POST "${base}/commands/auctions/${auction_id}/competitive-bids" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: audit-bid-${auction_id}" \
-  -H 'X-Thyphon-API-Key: local-bidder-nova' \
+  -H "X-Thyphon-API-Key: ${bidder_key}" \
   --data '{"company_id":"nova-corp","offer":"105.00"}' | grep -q '"expected_version":2'
 curl -fsS -X POST "${base}/commands/auctions/${auction_id}/accept-winning-bid" \
-  -H "Idempotency-Key: audit-accept-${auction_id}" -H 'X-Thyphon-API-Key: local-operator' | grep -q '"expected_version":3'
+  -H "Idempotency-Key: audit-accept-${auction_id}" -H "X-Thyphon-API-Key: ${operator_key}" | grep -q '"expected_version":3'
 
 for attempt in {1..30}; do
   query="$(curl -s "${base}/queries/auctions/${auction_id}?minimum_version=3")"
@@ -61,31 +74,31 @@ import hashlib, hmac, json, os, sys
 print(hmac.new(os.environ["THYPHON_PROVIDER_WEBHOOK_SECRET"].encode(), json.dumps({"settlement_id": sys.argv[1], "intention": sys.argv[2], "idempotency_key": sys.argv[3], "timestamp": int(sys.argv[4]), "payload": json.loads(sys.argv[5])}, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256).hexdigest())
 ' "$settlement_id" "$1" "$2" "$timestamp" "$3"
 }
-reject_payload='{"rejection_reason":"local funds release"}'
+reject_payload='{"rejection_reason":"insufficient funds"}'
 reject_key="audit-reject-${auction_id}"
 bad_callback_payload='{"provider_reference":"invalid-provider-callback"}'
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${base}/commands/settlements/${settlement_id}/confirm" \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: invalid-signature-${auction_id}" -H 'X-Thyphon-API-Key: local-payment-provider' \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: invalid-signature-${auction_id}" -H "X-Thyphon-API-Key: ${payment_provider_key}" \
   -H "X-Thyphon-Timestamp: ${webhook_timestamp}" -H "X-Thyphon-Signature: $(printf '0%.0s' {1..64})" --data "$bad_callback_payload")" == "401" ]]
 expired_timestamp="$((webhook_timestamp - 301))"
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${base}/commands/settlements/${settlement_id}/confirm" \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: expired-signature-${auction_id}" -H 'X-Thyphon-API-Key: local-payment-provider' \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: expired-signature-${auction_id}" -H "X-Thyphon-API-Key: ${payment_provider_key}" \
   -H "X-Thyphon-Timestamp: ${expired_timestamp}" -H "X-Thyphon-Signature: $(signature confirm-settlement "expired-signature-${auction_id}" "$bad_callback_payload" "$expired_timestamp")" --data "$bad_callback_payload")" == "401" ]]
 curl -fsS -X POST "${base}/commands/settlements/${settlement_id}/reject" \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: ${reject_key}" -H 'X-Thyphon-API-Key: local-payment-provider' \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: ${reject_key}" -H "X-Thyphon-API-Key: ${payment_provider_key}" \
   -H "X-Thyphon-Timestamp: ${webhook_timestamp}" -H "X-Thyphon-Signature: $(signature reject-settlement "$reject_key" "$reject_payload")" --data "$reject_payload" | grep -q '"expected_version":2'
-confirm_payload="{\"provider_reference\":\"late-local-provider-${auction_id}\"}"
+confirm_payload="{\"provider_reference\":\"late-provider-${auction_id}\"}"
 confirm_key="audit-late-${auction_id}"
 curl -fsS -X POST "${base}/commands/settlements/${settlement_id}/confirm" \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: ${confirm_key}" -H 'X-Thyphon-API-Key: local-payment-provider' \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: ${confirm_key}" -H "X-Thyphon-API-Key: ${payment_provider_key}" \
   -H "X-Thyphon-Timestamp: ${webhook_timestamp}" -H "X-Thyphon-Signature: $(signature confirm-settlement "$confirm_key" "$confirm_payload")" --data "$confirm_payload" | grep -q '"expected_version":4'
 refund_key="audit-refund-${auction_id}"
 curl -fsS -X POST "${base}/commands/settlements/${settlement_id}/refund-completed" \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: ${refund_key}" -H 'X-Thyphon-API-Key: local-payment-provider' \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: ${refund_key}" -H "X-Thyphon-API-Key: ${payment_provider_key}" \
   -H "X-Thyphon-Timestamp: ${webhook_timestamp}" -H "X-Thyphon-Signature: $(signature refund-completed "$refund_key" "$confirm_payload")" --data "$confirm_payload" | grep -q '"expected_version":5'
 repeat_key="audit-refund-repeat-${auction_id}"
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${base}/commands/settlements/${settlement_id}/refund-completed" \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: ${repeat_key}" -H 'X-Thyphon-API-Key: local-payment-provider' \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: ${repeat_key}" -H "X-Thyphon-API-Key: ${payment_provider_key}" \
   -H "X-Thyphon-Timestamp: ${webhook_timestamp}" -H "X-Thyphon-Signature: $(signature refund-completed "$repeat_key" "$confirm_payload")" --data "$confirm_payload")" == "422" ]]
 
 docker compose exec -T api python -m thyphon.projections.rebuild | grep -q '^Rebuilt auction-overview from [1-9]'

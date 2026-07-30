@@ -1,28 +1,23 @@
-# Thyphon — intención técnica y journey de ingeniería
+# Thyphon — notas de diseño
 
-> Este documento describe qué se está construyendo, por qué se eligieron sus
-> límites y cómo ha evolucionado desde la idea inicial hasta el estado actual.
-> Es deliberadamente más amplio que el README: funciona como mapa técnico,
-> registro de decisiones y backlog vivo.
+Notas de arquitectura, decisiones tomadas, incidencias que cambiaron el diseño
+y trabajo pendiente. El README cubre la entrada al proyecto; este documento
+recoge el contexto que normalmente se pierde entre iteraciones.
 
-## 0. La idea en una frase
+## 0. Contexto
 
 **Thyphon es un laboratorio de sistemas distribuidos con forma de mercado de
 materias primas:** compañías autónomas compiten por lotes escasos, las decisiones
 se convierten en hechos inmutables y las distintas vistas del sistema se
 reconcilian de forma eventual.
 
-Los minerales, los precios y los agentes son el vehículo. El objetivo real es
-hacer visibles y verificables problemas que un CRUD normal no genera de forma
-natural: colisiones de escritura, reintentos, duplicados, publicaciones fallidas,
-proyecciones retrasadas, workflows compensatorios y reconstrucción histórica.
+Los minerales, los precios y los agentes fuerzan problemas que un CRUD rara vez
+expone: colisiones de escritura, reintentos, duplicados, publicaciones fallidas,
+proyecciones retrasadas, compensaciones y reconstrucción histórica.
 
-El nombre del producto es siempre **Thyphon**. `thyphon` es únicamente el nombre
-del paquete Python.
+## 1. Alcance
 
-## 1. Resultado que se quiere conseguir
-
-La experiencia deseada tiene dos caras complementarias:
+El sistema tiene dos caras complementarias:
 
 1. Una consola ASCII con `curses` donde se percibe un mercado vivo: variación
    determinista de precios, empresas con estrategias diferentes, pujas, tape de
@@ -31,9 +26,8 @@ La experiencia deseada tiene dos caras complementarias:
    intención se valida sobre un agregado, se guarda como evento, se publica por
    outbox y actualiza modelos de lectura independientes.
 
-La TUI local no pretende ser un dashboard de Kafka. Es una simulación
-determinista y explícitamente etiquetada como tal. La topología PostgreSQL +
-Kafka es el camino de ejecución distribuido.
+La TUI es una simulación determinista. La topología PostgreSQL + Kafka cubre la
+ejecución distribuida.
 
 ## 2. Qué problema de negocio modela hoy
 
@@ -57,10 +51,9 @@ Si el dinero llega tarde tras un rechazo: RefundRequested
 RefundCompleted o RefundFailed
 ```
 
-El modelo no afirma todavía tener inventarios, envíos, reserva real de fondos,
-expiradores programados ni una economía de múltiples mercados. Esos temas están
-en el backlog porque necesitan reglas e invariantes propias, no columnas nuevas
-en una tabla existente.
+Inventario, envíos, reserva de fondos, expiración programada y múltiples
+mercados siguen fuera del alcance. Cada uno necesita sus propias invariantes,
+no una columna añadida a mitad de camino.
 
 ## 3. Principios que no se negocian
 
@@ -443,16 +436,9 @@ debe ejecutarse desde automatización sin que el operador lo haya decidido.
 
 Bazel organiza la suite hermética con `bazel test //...`. CI instala también
 los extras runtime, ejecuta Ruff y Pyright strict, y levanta Compose para la
-parte de integración. Los scripts de integración existen para que el CI y el
-operador puedan ejecutarlos; no sustituyen la observación de métricas bajo
-carga.
-
-### Estado de verificación honesto
-
-La sintaxis Python modificada, los scripts Zsh y el diff se han comprobado
-estáticamente. La ejecución de Bazel, Compose, Kafka, TUI y scripts live debe
-hacerla el operador cuando lo decida; no se debe afirmar que esa ejecución ha
-ocurrido si no hay evidencia de una corrida concreta.
+parte de integración. Los scripts de integración cubren concurrencia PostgreSQL,
+upgrade de streams, proyección PostgreSQL, entrega legacy y el flujo live. Bajo
+carga siguen haciendo falta métricas y observación operativa.
 
 ## 15. Errores encontrados y cómo cambiaron el diseño
 
@@ -479,7 +465,7 @@ ocurrido si no hay evidencia de una corrida concreta.
 
 ## 16. Limitaciones conocidas
 
-Estas no son deudas ocultas; delimitan conscientemente el alcance actual:
+Límites conocidos del alcance actual:
 
 - No hay reserva de capital ni verificación de Company antes de pujar.
 - No hay deadline real ni scheduler para `ExpireAuction`.
@@ -572,8 +558,8 @@ Puntos de entrada útiles:
 
 ## 19. Criterio de éxito
 
-Thyphon tendrá valor como pieza de portfolio si permite explicar, demostrar y
-medir con honestidad estas preguntas:
+El proyecto queda bien defendido si responde con código, pruebas y métricas a
+estas preguntas:
 
 - ¿Por qué este dominio necesita CQRS/Event Sourcing y cuándo no lo necesitaría?
 - ¿Qué protege la invariante si dos actores pujan a la vez?
@@ -585,6 +571,5 @@ medir con honestidad estas preguntas:
 - ¿Qué parte es consistente inmediatamente y qué parte es eventualmente
   consistente?
 
-Mientras cada respuesta esté respaldada por código, una prueba y un trade-off
-explícito, el proyecto seguirá siendo un laboratorio técnico útil y no una
-colección de palabras de moda.
+Cada respuesta debe estar respaldada por código, una prueba y un trade-off
+explícito.

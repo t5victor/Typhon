@@ -6,7 +6,7 @@ services:
       context: .
       dockerfile: Dockerfile.postgres
       pull: true
-    image: thyphon-postgres:phase-2
+    image: thyphon-postgres:local
     environment:
       POSTGRES_DB: thyphon
       POSTGRES_USER: thyphon
@@ -23,7 +23,7 @@ services:
       context: .
       dockerfile: Dockerfile.kafka
       pull: true
-    image: thyphon-kafka:phase-2
+    image: thyphon-kafka:local
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -45,7 +45,7 @@ services:
       context: .
       dockerfile: Dockerfile
       pull: true
-    image: thyphon-api:phase-2
+    image: thyphon-api:local
     command: ["uvicorn", "thyphon.api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     env_file: .env
     environment:
@@ -63,14 +63,14 @@ services:
       postgres: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
   migrate:
-    image: thyphon-api:phase-2
+    image: thyphon-api:local
     command: ["python", "-m", "thyphon.infrastructure.migrate"]
     environment:
       THYPHON_DATABASE_URL: postgresql://thyphon:thyphon@postgres:5432/thyphon
     depends_on:
       postgres: { condition: service_healthy }
   outbox-worker:
-    image: thyphon-api:phase-2
+    image: thyphon-api:local
     command: ["python", "-m", "thyphon.workers.main", "outbox"]
     restart: unless-stopped
     environment:
@@ -81,7 +81,7 @@ services:
       kafka: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
   projection-worker:
-    image: thyphon-api:phase-2
+    image: thyphon-api:local
     command: ["python", "-m", "thyphon.workers.main", "projection"]
     restart: unless-stopped
     environment:
@@ -92,7 +92,7 @@ services:
       kafka: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
   redrive-outbox-worker:
-    image: thyphon-api:phase-2
+    image: thyphon-api:local
     command: ["python", "-m", "thyphon.workers.main", "redrive-outbox"]
     restart: unless-stopped
     environment:
@@ -103,7 +103,7 @@ services:
       kafka: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
   dead-letter-outbox-worker:
-    image: thyphon-api:phase-2
+    image: thyphon-api:local
     command: ["python", "-m", "thyphon.workers.main", "dead-letter-outbox"]
     restart: unless-stopped
     environment:

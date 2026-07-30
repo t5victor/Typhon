@@ -14,10 +14,27 @@
 | Settlement | `ConfirmSettlement` after rejection | `LateSettlementDetected`, `RefundRequested` | Late money cannot silently restore a released claim. |
 | Settlement | `CompleteRefund` / `FailRefund` | `RefundCompleted` / `RefundFailed` | Compensation is resolved exactly once and remains auditable. |
 
-The catalog rejects mechanical CRUD titles. `Created`, `Updated`, `Deleted`, `SetStatus`, and `StatusChanged` are prohibited because they hide the business decision or fact being represented.
+Avoid mechanical CRUD titles. `Created`, `Updated`, `Deleted`, `SetStatus` and
+`StatusChanged` hide the decision or fact that matters to the domain.
 
-Event envelopes have a schema version and a global position. Schema versions below 1 or newer than the reader are rejected. `SettlementRequested` is currently v2; the reader upcasts v1 records by preserving the unknown causal event as `null`, while new `RequestSettlement` intentions require a UUID winning-bid ID. A winning-bid ID is globally claimed by one Settlement stream, is foreign-keyed to the immutable event log, and must identify the matching `WinningBidAccepted` fact for Auction, company and offer. Before a worker projects or starts a Settlement, it verifies that every envelope exactly matches its immutable Event Store row. Rebuild is an administrative command: `python -m thyphon.projections.rebuild`.
+Envelopes carry a schema version and global position. Readers reject versions
+below 1 or newer than they understand. `SettlementRequested` is at v2; v1 is
+upcast with an unknown causal event, while new `RequestSettlement` commands
+require a UUID winning-bid ID. That ID is claimed by one Settlement stream,
+foreign-keyed to the immutable log and checked against the matching Auction,
+company and offer. Workers compare each broker envelope with its Event Store
+record before projecting it or starting Settlement. Rebuild remains an
+administrative command: `python -m thyphon.projections.rebuild`.
 
-Quarantined projection events are inspected and redriven manually after their cause is fixed: `python -m thyphon.workers.redrive <event-id> [operator] [reason]`. That command records a durable, idempotent `attempt_id` with `pending`, `published`, `resolved`, `failed`, or `superseded` lifecycle state. The redrive-outbox worker later publishes it with the attempt in a Kafka header. The consumer locks and validates that exact attempt before rebuilding; receiving the record is sufficient even if the dispatcher has not yet persisted `published_at`. A duplicate delivery of a terminal attempt is an acknowledged no-op, but an unknown or mismatched attempt is quarantined. A redrive of an Auction stream rebuilds that stream from canonical Event Store order rather than applying one old event into a possible gap. The projection receipt is written only after the projection transition succeeds.
+After fixing the cause, redrive with `python -m thyphon.workers.redrive
+<event-id> [operator] [reason]`. The command records one durable `attempt_id`
+with `pending`, `published`, `resolved`, `failed` or `superseded` state. The
+redrive outbox adds the attempt to the Kafka headers. Consumers lock and verify
+the attempt before rebuilding. A terminal duplicate is a no-op; an unknown or
+mismatched attempt is quarantined. Auction redrive rebuilds the complete stream
+in canonical order. Projection receipts are written after a real transition.
 
-Quarantine itself is transactional. `projection_dead_letter_outbox` stores the publication intent with the source coordinates, a SHA-256, byte size and a bounded Base64 preview. The raw poison record, when it has no canonical event ID, remains only in `projection_raw_failure`; the DLQ never amplifies it by embedding the full envelope and Base64 copy.
+Quarantine is transactional. `projection_dead_letter_outbox` stores the source
+coordinates, SHA-256, byte size and bounded Base64 preview. Raw non-canonical
+records remain in `projection_raw_failure`; the DLQ never embeds a second full
+copy.
