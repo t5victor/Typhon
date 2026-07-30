@@ -4,10 +4,8 @@ Thyphon is an event-sourced commodity auction simulator. Autonomous companies
 compete for finite mineral lots while the system handles optimistic conflicts,
 idempotent commands, asynchronous projections and at-least-once delivery.
 
-The terminal UI is part of the project, not a wrapper around a CRUD demo. It
-runs a deterministic market tape with competing bidders, moving prices and
-operational counters. The backend keeps the same concerns explicit in
-PostgreSQL and Kafka.
+The terminal UI runs a deterministic market tape with competing bidders, moving prices and
+operational counters. The backend keeps the same concerns explicit in PostgreSQL and Kafka.
 
 ## Runtime path
 
