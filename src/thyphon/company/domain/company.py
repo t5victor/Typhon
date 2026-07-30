@@ -52,6 +52,7 @@ class Company:
     def _record(self, event: DomainEvent) -> None:
         self._apply(event)
         self._uncommitted.append(event)
+        self.version += 1
 
     def _apply(self, event: DomainEvent) -> None:
         match event:

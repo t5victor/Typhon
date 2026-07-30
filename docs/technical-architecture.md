@@ -58,6 +58,11 @@ the action that matters when replaying history.
 Every command and event owns its directory. Tests live beside the aggregate or
 projection they exercise rather than inside a command directory.
 
+`Company` is currently a domain experiment, not a public vertical slice: it
+does not yet authorize bids or reserve capital. `ExpireAuction` is likewise a
+domain capability awaiting an explicit scheduler/operations slice. Neither is
+presented as a completed market workflow.
+
 ### Auction
 
 - A lot opens once with a positive quantity and reserve price.
@@ -130,9 +135,12 @@ attempt republishes the immutable event. Consumers are therefore idempotent by
 design.
 
 One logical outbox dispatcher publishes at a time. A PostgreSQL advisory lock
-prevents horizontally scaled replicas from publishing a later global position
-before an earlier one. Dispatcher connections are discarded and recreated after
-infrastructure failures such as a PostgreSQL restart.
+and ordered row locks prevent horizontally scaled replicas from publishing a
+later global position before an earlier one. Delivery acknowledgement and the
+publication mark remain deliberately at-least-once: a database failure after a
+Kafka acknowledgement republishes the immutable fact. Dispatcher connections
+are discarded and recreated after infrastructure failures such as a PostgreSQL
+restart.
 
 Kafka records are verified against the canonical PostgreSQL row before they are
 projected or allowed to start Settlement. The check covers event ID, stream,

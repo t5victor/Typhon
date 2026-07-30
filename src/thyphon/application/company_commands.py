@@ -32,9 +32,10 @@ class CompanyCommandHandler:
             return receipt
         stream = self.store.read_stream(stream_id)
         company = Company.rehydrate(stream_id, [item.event for item in stream])
+        expected_version = company.version
         company.change_risk_appetite(command.new_appetite)
         return self.store.append(
-            stream_id=stream_id, expected_version=company.version,
+            stream_id=stream_id, expected_version=expected_version,
             events=company.pull_uncommitted_events(), idempotency_key=context.idempotency_key,
             command_name=command_name, request_hash=request_hash, context=context,
         )

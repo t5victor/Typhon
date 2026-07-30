@@ -54,10 +54,11 @@ class AuctionCommandHandler:
             return receipt
         stream = self.store.read_stream(stream_id)
         auction = Auction.rehydrate(stream_id, [item.event for item in stream])
+        expected_version = auction.version
         auction.accept_winning_bid()
         return self.store.append(
             stream_id=stream_id,
-            expected_version=auction.version,
+            expected_version=expected_version,
             events=auction.pull_uncommitted_events(),
             idempotency_key=context.idempotency_key,
             command_name=command_name, request_hash=request_hash, context=context,
@@ -71,10 +72,11 @@ class AuctionCommandHandler:
             return receipt
         stream = self.store.read_stream(stream_id)
         auction = Auction.rehydrate(stream_id, [item.event for item in stream])
+        expected_version = auction.version
         auction.expire(command.expired_at)
         return self.store.append(
             stream_id=stream_id,
-            expected_version=auction.version,
+            expected_version=expected_version,
             events=auction.pull_uncommitted_events(),
             idempotency_key=context.idempotency_key,
             command_name=command_name, request_hash=request_hash, context=context,

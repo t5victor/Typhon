@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — unreleased
 
 - Added the Auction, Company and Settlement event-sourced slices.
 - Added PostgreSQL event storage, Kafka outbox delivery and read-model rebuilds.

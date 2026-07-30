@@ -321,6 +321,12 @@ MIGRATIONS = {
         UNIQUE (consumer_name, source_topic, partition_id, message_offset)
       );
     """,
+    "013_add_worker_heartbeats": """
+      CREATE TABLE IF NOT EXISTS worker_heartbeat (
+        worker_name TEXT PRIMARY KEY,
+        last_beat_at TIMESTAMPTZ NOT NULL
+      );
+    """,
 }
 
 

@@ -42,8 +42,10 @@ without Docker.
 
 ## What is implemented
 
-- Event-sourced `Auction`, `Company` and `Settlement` aggregates. Streams are
+- Event-sourced `Auction` and `Settlement` vertical slices. Streams are
   replayed in full; snapshots are intentionally not used.
+- An experimental `Company` aggregate kept outside the live bidding path until
+  capital reservation and ownership are modelled end to end.
 - Intent-led commands and business-fact events, with one directory per command
   or event.
 - PostgreSQL event store, optimistic stream versions, command idempotency and
@@ -63,6 +65,11 @@ bazel test //...
 
 The console uses the alternate screen buffer. `Q` exits, `Space` pauses,
 `+`/`-` change speed, `R` replays the active seed and `N` enters a new one.
+
+The supported development baseline is Python 3.13 and Bazelisk. The simulator
+is hermetic: it needs neither Docker nor a running broker. If Bazel cannot use
+its output directory, make that directory writable or set a writable
+`--output_user_root`; do not run it with elevated privileges.
 
 ## Local runtime
 
@@ -85,6 +92,15 @@ docker compose up -d --wait
 The API listens on `http://127.0.0.1:18000`. Commands return an accepted stream
 version; queries can request `minimum_version` and receive `202` with
 `Retry-After` while the projection catches up.
+
+Stop the local stack without deleting its PostgreSQL volume with:
+
+```bash
+docker compose down
+```
+
+Use `docker compose down -v` only when deliberately discarding local event
+history.
 
 ## Operations
 

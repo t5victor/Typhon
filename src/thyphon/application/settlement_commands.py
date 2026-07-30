@@ -6,7 +6,14 @@ from thyphon.settlement.domain.commands.fail_refund.command import FailRefund
 from thyphon.settlement.domain.commands.reject_settlement.command import RejectSettlement
 from thyphon.settlement.domain.commands.request_settlement.command import RequestSettlement
 from thyphon.settlement.domain.settlement import Settlement
+from collections.abc import Callable
+from typing import Protocol
+
 from thyphon.shared.domain import CommandContext, EventStore, command_metadata, stream_key
+
+
+class SettlementActionCommand(Protocol):
+    settlement_id: str
 
 
 class SettlementCommandHandler:
@@ -39,7 +46,10 @@ class SettlementCommandHandler:
     def fail_refund(self, command: FailRefund, context: CommandContext) -> int:
         return self._execute(command, context, lambda settlement: settlement.fail_refund(command.provider_reference, command.failure_reason))
 
-    def _execute(self, command, context: CommandContext, operation) -> int:
+    def _execute(
+        self, command: SettlementActionCommand, context: CommandContext,
+        operation: Callable[[Settlement], None],
+    ) -> int:
         settlement_id = command.settlement_id
         stream_id = stream_key("settlement", settlement_id)
         idempotency_key = context.idempotency_key
@@ -49,9 +59,10 @@ class SettlementCommandHandler:
             return receipt
         stream = self.store.read_stream(stream_id)
         settlement = Settlement.rehydrate(stream_id, [item.event for item in stream])
+        expected_version = settlement.version
         operation(settlement)
         return self.store.append(
-            stream_id=stream_id, expected_version=settlement.version,
+            stream_id=stream_id, expected_version=expected_version,
             events=settlement.pull_uncommitted_events(), idempotency_key=idempotency_key,
             command_name=command_name, request_hash=request_hash, context=context,
         )

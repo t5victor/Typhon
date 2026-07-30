@@ -30,7 +30,7 @@ class CanonicalEventDecodeError(ValueError):
     a rolling schema upgrade require a full rebuild merely to retry one row.
     """
 
-    def __init__(self, event_id: UUID, error: ValueError) -> None:
+    def __init__(self, event_id: UUID, error: Exception) -> None:
         super().__init__(str(error))
         self.event_id = event_id
 
@@ -147,7 +147,7 @@ class PostgresEventStore:
             raise ValueError("domain-event envelope occurred_at differs from its Event Store fact")
         try:
             recorded = self._recorded(stream_id, stream_version, event_name, payload, global_position, schema_version)
-        except ValueError as error:
+        except (KeyError, TypeError, ValueError) as error:
             raise CanonicalEventDecodeError(event_id, error) from error
         if recorded.event.event_id != event_id:
             raise ValueError("Event Store payload event_id differs from its Event Store row")

@@ -70,6 +70,11 @@ CREATE TABLE process_checkpoint (
     last_observed_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE worker_heartbeat (
+    worker_name TEXT PRIMARY KEY,
+    last_beat_at TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE projection_failure (
     consumer_name TEXT NOT NULL,
     event_id UUID NOT NULL,

@@ -14,5 +14,6 @@ each envelope against PostgreSQL before projecting it or starting Settlement.
 Production deployments still require TLS/SASL, ACLs, separate database roles
 and infrastructure-level network controls.
 
-Report vulnerabilities privately to the maintainer. Do not open a public issue
-with exploit details or credentials.
+Report vulnerabilities through the repository's
+[private vulnerability-reporting channel](https://github.com/t5victor/Typhon/security/advisories/new).
+Do not open a public issue with exploit details or credentials.

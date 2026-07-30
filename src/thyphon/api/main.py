@@ -9,11 +9,12 @@ from time import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from decimal import Decimal
+from collections.abc import Callable
 from typing import Any, cast
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from thyphon.application.auction_commands import AuctionCommandHandler
 from thyphon.application.settlement_commands import SettlementCommandHandler
@@ -29,28 +30,32 @@ from thyphon.settlement.domain.commands.reject_settlement.command import RejectS
 from thyphon.shared.domain import CommandContext, DomainViolation, IdempotencyKeyReused, InvalidSettlementCausation, OptimisticConcurrencyConflict, ProviderReferenceAlreadyObserved, SettlementAlreadyRequestedForWinningBid
 
 
-class OpenAuctionRequest(BaseModel):
+class CommandRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class OpenAuctionRequest(CommandRequest):
     auction_id: str = Field(pattern=r"^[a-z0-9-]+$", max_length=80)
     resource: str = Field(min_length=1, max_length=80)
     quantity: int = Field(gt=0, le=1_000_000)
     reserve_price: Decimal = Field(gt=0, max_digits=18, decimal_places=2)
 
 
-class PlaceCompetitiveBidRequest(BaseModel):
+class PlaceCompetitiveBidRequest(CommandRequest):
     company_id: str = Field(min_length=1, max_length=100)
     offer: Decimal = Field(gt=0, max_digits=18, decimal_places=2)
     expected_version: int | None = Field(default=None, ge=0, le=2_000_000_000)
 
 
-class ProviderConfirmationRequest(BaseModel):
+class ProviderConfirmationRequest(CommandRequest):
     provider_reference: str = Field(min_length=1, max_length=120)
 
 
-class SettlementRejectionRequest(BaseModel):
+class SettlementRejectionRequest(CommandRequest):
     rejection_reason: str = Field(min_length=1, max_length=240)
 
 
-class RefundFailureRequest(BaseModel):
+class RefundFailureRequest(CommandRequest):
     provider_reference: str = Field(min_length=1, max_length=120)
     failure_reason: str = Field(min_length=1, max_length=240)
 
@@ -127,7 +132,7 @@ def create_app() -> FastAPI:
     )
     broker_ready_until = 0.0
 
-    def execute(action):
+    def execute(action: Callable[[], int]) -> int:
         try:
             return action()
         except (DomainViolation, InvalidSettlementCausation, ValueError) as error:

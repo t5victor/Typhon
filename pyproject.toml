@@ -3,6 +3,22 @@ name = "thyphon"
 version = "0.3.0"
 description = "Thyphon event-sourced commodity allocation exchange"
 requires-python = ">=3.13"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Thyphon contributors" }]
+keywords = ["cqrs", "event-sourcing", "fastapi", "kafka", "postgresql", "python"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Repository = "https://github.com/t5victor/Typhon"
+Issues = "https://github.com/t5victor/Typhon/issues"
+Documentation = "https://github.com/t5victor/Typhon/tree/master/docs"
 
 [project.optional-dependencies]
 runtime = ["fastapi==0.141.1", "uvicorn==0.52.0", "psycopg[binary]==3.3.4", "psycopg-pool==3.3.0", "aiokafka==0.14.0"]
@@ -22,7 +38,7 @@ typeCheckingMode = "strict"
 thyphon = "thyphon.tui.main:main"
 
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools==75.8.2"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

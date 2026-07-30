@@ -89,7 +89,13 @@ class AuctionOverviewProjector:
             self.store.connection.execute(
                 "DELETE FROM projection_receipt WHERE consumer_name=?", (self.consumer_name,)
             )
-        all_events = [event for event in self.store.all_events() if event.stream_id.startswith("auction:")]
+        # Delivery positions are not aggregate history. Keeping the hermetic
+        # adapter on the same canonical order as PostgreSQL prevents a legacy
+        # import from hiding a v2-before-v1 rebuild bug in tests.
+        all_events = sorted(
+            (event for event in self.store.all_events() if event.stream_id.startswith("auction:")),
+            key=lambda event: (event.stream_id, event.stream_version),
+        )
         for recorded in all_events:
             self.apply(recorded)
         return len(all_events)

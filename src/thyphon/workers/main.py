@@ -36,6 +36,33 @@ def _close_quietly(connection: Any | None) -> None:
         pass
 
 
+def _heartbeat(cursor: Any, worker_name: str) -> None:
+    cursor.execute(
+        "INSERT INTO worker_heartbeat(worker_name, last_beat_at) VALUES (%s, NOW()) "
+        "ON CONFLICT (worker_name) DO UPDATE SET last_beat_at=EXCLUDED.last_beat_at",
+        (worker_name,),
+    )
+
+
+async def _consumer_heartbeat(dsn: str, worker_name: str, stop: asyncio.Event) -> None:
+    """Keep idle consumers observable without claiming that their lag is zero."""
+    psycopg, _, _ = _runtime()
+    while not stop.is_set():
+        connection: Any | None = None
+        try:
+            connection = psycopg.connect(dsn, autocommit=True)
+            with connection.transaction(), connection.cursor() as cursor:
+                _heartbeat(cursor, worker_name)
+        except Exception as error:
+            print(f"{worker_name} heartbeat failed after {type(error).__name__}: {error}", file=sys.stderr)
+        finally:
+            _close_quietly(connection)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=5.0)
+        except TimeoutError:
+            pass
+
+
 async def run_outbox() -> None:
     """Publish canonical events in global order from a reconnectable dispatcher."""
     psycopg, _, producer_type = _runtime()
@@ -62,7 +89,7 @@ async def run_outbox() -> None:
                             "JOIN event_stream e ON e.event_id = o.event_id "
                             "WHERE o.published_at IS NULL "
                             "ORDER BY e.global_position "
-                            "LIMIT 50 FOR UPDATE OF o SKIP LOCKED"
+                            "LIMIT 50 FOR UPDATE OF o"
                         )
                         pending = cursor.fetchall()
                     for row in pending:
@@ -73,6 +100,7 @@ async def run_outbox() -> None:
                         cursor.execute(
                             "UPDATE transactional_outbox SET published_at=NOW() WHERE event_id=%s", (row["event_id"],)
                         )
+                    _heartbeat(cursor, "outbox-worker")
             except Exception as error:
                 # A restart can invalidate an otherwise open psycopg connection.
                 # Discard it rather than leaving a healthy-looking worker wedged.
@@ -118,6 +146,7 @@ async def run_redrive_outbox() -> None:
                             "WHERE attempt_id=%s AND status='pending'",
                             (attempt["attempt_id"],),
                         )
+                    _heartbeat(cursor, "redrive-outbox-worker")
             except Exception as error:
                 _close_quietly(connection)
                 connection = None
@@ -167,6 +196,7 @@ async def run_dead_letter_outbox() -> None:
                             "UPDATE projection_dead_letter_outbox SET published_at=NOW() WHERE dead_letter_id=%s",
                             (row["dead_letter_id"],),
                         )
+                    _heartbeat(cursor, "dead-letter-outbox-worker")
             except Exception as error:
                 _close_quietly(connection)
                 connection = None
@@ -365,6 +395,8 @@ async def run_projection() -> None:
         enable_auto_commit=False, auto_offset_reset="earliest",
     )
     await consumer.start()
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task = asyncio.create_task(_consumer_heartbeat(dsn, "projection-worker", heartbeat_stop))
     try:
         infrastructure_retries: dict[tuple[str, int, int], int] = {}
         async for message in consumer:
@@ -455,6 +487,7 @@ async def run_projection() -> None:
                             "ON CONFLICT (process_name) DO UPDATE SET last_observed_at=EXCLUDED.last_observed_at",
                             (projector.consumer_name,),
                         )
+                        _heartbeat(cursor, "projection-worker")
             except Exception as checkpoint_error:
                 if _is_infrastructure_error(checkpoint_error):
                     retry_key = (message.topic, message.partition, message.offset)
@@ -467,6 +500,8 @@ async def run_projection() -> None:
                 raise
             await consumer.commit()
     finally:
+        heartbeat_stop.set()
+        await heartbeat_task
         await consumer.stop()
         failure_pool.close()
         projector.close()
@@ -495,6 +530,8 @@ async def run_settlement_process_manager() -> None:
         enable_auto_commit=False, auto_offset_reset="earliest",
     )
     await consumer.start()
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task = asyncio.create_task(_consumer_heartbeat(dsn, "settlement-process-manager", heartbeat_stop))
     try:
         infrastructure_retries: dict[tuple[str, int, int], int] = {}
         async for message in consumer:
@@ -577,6 +614,7 @@ async def run_settlement_process_manager() -> None:
                             "ON CONFLICT (process_name) DO UPDATE SET last_observed_at=EXCLUDED.last_observed_at",
                             (consumer_name,),
                         )
+                        _heartbeat(cursor, "settlement-process-manager")
             except Exception as checkpoint_error:
                 if _is_infrastructure_error(checkpoint_error):
                     retry_key = (message.topic, message.partition, message.offset)
@@ -589,6 +627,8 @@ async def run_settlement_process_manager() -> None:
                 raise
             await consumer.commit()
     finally:
+        heartbeat_stop.set()
+        await heartbeat_task
         await consumer.stop()
         failure_pool.close()
         settlement_store.close()
