@@ -237,6 +237,81 @@ MIGRATIONS = {
         END IF;
       END $$;
     """,
+    "012_harden_redrive_lifecycle_and_dead_letter_outbox": """
+      ALTER TABLE projection_redrive_attempt ADD COLUMN IF NOT EXISTS status TEXT;
+      ALTER TABLE projection_redrive_attempt ADD COLUMN IF NOT EXISTS requested_by TEXT;
+      ALTER TABLE projection_redrive_attempt ADD COLUMN IF NOT EXISTS reason TEXT;
+      ALTER TABLE projection_redrive_attempt ADD COLUMN IF NOT EXISTS last_error TEXT;
+      ALTER TABLE projection_redrive_attempt ADD COLUMN IF NOT EXISTS superseded_at TIMESTAMPTZ;
+      UPDATE projection_redrive_attempt
+      SET status=CASE
+        WHEN resolved_at IS NOT NULL THEN 'resolved'
+        WHEN published_at IS NOT NULL THEN 'published'
+        ELSE 'pending'
+      END
+      WHERE status IS NULL;
+      UPDATE projection_redrive_attempt SET requested_by='legacy-operator' WHERE requested_by IS NULL;
+      UPDATE projection_redrive_attempt SET reason='legacy redrive' WHERE reason IS NULL;
+      ALTER TABLE projection_redrive_attempt ALTER COLUMN status SET NOT NULL;
+      ALTER TABLE projection_redrive_attempt ALTER COLUMN requested_by SET NOT NULL;
+      ALTER TABLE projection_redrive_attempt ALTER COLUMN reason SET NOT NULL;
+      ALTER TABLE projection_redrive_attempt ALTER COLUMN status SET DEFAULT 'pending';
+      ALTER TABLE projection_redrive_attempt ALTER COLUMN requested_by SET DEFAULT 'operator';
+      ALTER TABLE projection_redrive_attempt ALTER COLUMN reason SET DEFAULT 'manual redrive';
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname='projection_redrive_attempt_status_check'
+        ) THEN
+          ALTER TABLE projection_redrive_attempt
+          ADD CONSTRAINT projection_redrive_attempt_status_check
+          CHECK (status IN ('pending', 'published', 'resolved', 'failed', 'superseded'));
+        END IF;
+      END $$;
+      WITH ranked AS (
+        SELECT attempt_id, row_number() OVER (
+          PARTITION BY consumer_name, event_id ORDER BY requested_at DESC, attempt_id DESC
+        ) AS attempt_rank
+        FROM projection_redrive_attempt
+        WHERE status IN ('pending', 'published')
+      )
+      UPDATE projection_redrive_attempt a
+      SET status='superseded', superseded_at=NOW(), last_error='superseded while migrating duplicate active attempts'
+      FROM ranked r WHERE a.attempt_id=r.attempt_id AND r.attempt_rank > 1;
+      UPDATE projection_failure f
+      SET active_redrive_attempt_id=active.attempt_id
+      FROM (
+        SELECT DISTINCT ON (consumer_name, event_id) consumer_name, event_id, attempt_id
+        FROM projection_redrive_attempt
+        WHERE status IN ('pending', 'published')
+        ORDER BY consumer_name, event_id, requested_at DESC, attempt_id DESC
+      ) active
+      WHERE f.consumer_name=active.consumer_name AND f.event_id=active.event_id AND f.resolved_at IS NULL;
+      UPDATE projection_redrive_attempt a
+      SET status='resolved', resolved_at=COALESCE(a.resolved_at, NOW())
+      FROM projection_failure f
+      WHERE a.consumer_name=f.consumer_name AND a.event_id=f.event_id
+        AND f.resolved_at IS NOT NULL AND a.status IN ('pending', 'published');
+      CREATE UNIQUE INDEX IF NOT EXISTS projection_redrive_attempt_one_active
+      ON projection_redrive_attempt(consumer_name, event_id)
+      WHERE status IN ('pending', 'published');
+      CREATE TABLE IF NOT EXISTS projection_dead_letter_outbox (
+        dead_letter_id UUID PRIMARY KEY,
+        consumer_name TEXT NOT NULL,
+        source_topic TEXT NOT NULL,
+        partition_id INTEGER NOT NULL,
+        message_offset BIGINT NOT NULL,
+        canonical_event_id UUID,
+        candidate_event_id UUID,
+        raw_sha256 TEXT NOT NULL,
+        raw_size BIGINT NOT NULL,
+        preview_base64 TEXT,
+        last_error TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        published_at TIMESTAMPTZ,
+        UNIQUE (consumer_name, source_topic, partition_id, message_offset)
+      );
+    """,
 }
 
 

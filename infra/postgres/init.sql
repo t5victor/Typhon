@@ -95,6 +95,23 @@ CREATE TABLE projection_raw_failure (
     PRIMARY KEY (consumer_name, topic, partition_id, message_offset)
 );
 
+CREATE TABLE projection_dead_letter_outbox (
+    dead_letter_id UUID PRIMARY KEY,
+    consumer_name TEXT NOT NULL,
+    source_topic TEXT NOT NULL,
+    partition_id INTEGER NOT NULL,
+    message_offset BIGINT NOT NULL,
+    canonical_event_id UUID,
+    candidate_event_id UUID,
+    raw_sha256 TEXT NOT NULL,
+    raw_size BIGINT NOT NULL,
+    preview_base64 TEXT,
+    last_error TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    published_at TIMESTAMPTZ,
+    UNIQUE (consumer_name, source_topic, partition_id, message_offset)
+);
+
 CREATE TABLE projection_redrive_attempt (
     attempt_id UUID PRIMARY KEY,
     consumer_name TEXT NOT NULL,
@@ -102,5 +119,14 @@ CREATE TABLE projection_redrive_attempt (
     envelope JSONB NOT NULL,
     requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     published_at TIMESTAMPTZ,
-    resolved_at TIMESTAMPTZ
+    resolved_at TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'published', 'resolved', 'failed', 'superseded')),
+    requested_by TEXT NOT NULL DEFAULT 'operator',
+    reason TEXT NOT NULL DEFAULT 'manual redrive',
+    last_error TEXT,
+    superseded_at TIMESTAMPTZ
 );
+
+CREATE UNIQUE INDEX projection_redrive_attempt_one_active
+ON projection_redrive_attempt(consumer_name, event_id)
+WHERE status IN ('pending', 'published');

@@ -109,8 +109,8 @@ class PostgresAuctionOverviewProjector:
     def _require_next_version(cursor: Any, auction_id: str, recorded: RecordedEvent) -> None:
         cursor.execute("SELECT stream_version FROM auction_overview WHERE auction_id=%s FOR UPDATE", (auction_id,))
         current = cursor.fetchone()
-        if current is None or int(current[0]) != recorded.stream_version - 1:
-            observed = "missing" if current is None else str(current[0])
+        if current is None or int(current["stream_version"]) != recorded.stream_version - 1:
+            observed = "missing" if current is None else str(current["stream_version"])
             raise ProjectionGap(f"{recorded.stream_id} v{recorded.stream_version} follows projected version {observed}")
 
     def overview(self, auction_id: str) -> dict[str, Any] | None:

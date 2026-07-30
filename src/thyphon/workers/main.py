@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import sys
 from contextlib import contextmanager
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from thyphon.application.settlement_commands import SettlementCommandHandler
 from thyphon.projections.postgres_auction_overview import PostgresAuctionOverviewProjector
@@ -26,25 +27,44 @@ def _runtime():
         raise RuntimeError("Install Thyphon with the 'runtime' extra") from error
 
 
+def _close_quietly(connection: Any | None) -> None:
+    if connection is None:
+        return
+    try:
+        connection.close()
+    except Exception:
+        pass
+
+
 async def run_outbox() -> None:
+    """Publish canonical events in global order from a reconnectable dispatcher."""
     psycopg, _, producer_type = _runtime()
     dsn = os.environ["THYPHON_DATABASE_URL"]
     bootstrap = os.environ["THYPHON_KAFKA_BOOTSTRAP"]
     producer = producer_type(bootstrap_servers=bootstrap, acks="all")
     await producer.start()
-    connection = psycopg.connect(dsn, row_factory=psycopg.rows.dict_row, autocommit=True)
+    connection: Any | None = None
     try:
         while True:
             try:
+                if connection is None:
+                    connection = psycopg.connect(dsn, row_factory=psycopg.rows.dict_row, autocommit=True)
                 with connection.transaction(), connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT o.event_id, o.topic, o.partition_key, o.body FROM transactional_outbox o "
-                        "JOIN event_stream e ON e.event_id = o.event_id "
-                        "WHERE o.published_at IS NULL "
-                        "ORDER BY e.global_position "
-                        "LIMIT 50 FOR UPDATE OF o SKIP LOCKED"
-                    )
-                    pending = cursor.fetchall()
+                    # One logical dispatcher prevents SKIP LOCKED replicas from
+                    # publishing N+1 before N, including within one stream.
+                    cursor.execute("SELECT pg_try_advisory_xact_lock(421339) AS locked")
+                    lock = cursor.fetchone()
+                    if lock is None or not lock["locked"]:
+                        pending: list[dict[str, Any]] = []
+                    else:
+                        cursor.execute(
+                            "SELECT o.event_id, o.topic, o.partition_key, o.body FROM transactional_outbox o "
+                            "JOIN event_stream e ON e.event_id = o.event_id "
+                            "WHERE o.published_at IS NULL "
+                            "ORDER BY e.global_position "
+                            "LIMIT 50 FOR UPDATE OF o SKIP LOCKED"
+                        )
+                        pending = cursor.fetchall()
                     for row in pending:
                         await producer.send_and_wait(
                             row["topic"], key=row["partition_key"].encode(),
@@ -53,15 +73,18 @@ async def run_outbox() -> None:
                         cursor.execute(
                             "UPDATE transactional_outbox SET published_at=NOW() WHERE event_id=%s", (row["event_id"],)
                         )
-            except Exception:
-                # Publication is at-least-once: the transaction rolls back and
-                # the same immutable outbox record is retried after backoff.
+            except Exception as error:
+                # A restart can invalidate an otherwise open psycopg connection.
+                # Discard it rather than leaving a healthy-looking worker wedged.
+                _close_quietly(connection)
+                connection = None
+                print(f"outbox dispatcher reconnecting after {type(error).__name__}: {error}", file=sys.stderr)
                 await asyncio.sleep(1.0)
                 continue
             await asyncio.sleep(0.1)
     finally:
         await producer.stop()
-        connection.close()
+        _close_quietly(connection)
 
 
 async def run_redrive_outbox() -> None:
@@ -71,13 +94,15 @@ async def run_redrive_outbox() -> None:
     bootstrap = os.environ["THYPHON_KAFKA_BOOTSTRAP"]
     producer = producer_type(bootstrap_servers=bootstrap, acks="all")
     await producer.start()
-    connection = psycopg.connect(dsn, row_factory=psycopg.rows.dict_row, autocommit=True)
+    connection: Any | None = None
     try:
         while True:
             try:
+                if connection is None:
+                    connection = psycopg.connect(dsn, row_factory=psycopg.rows.dict_row, autocommit=True)
                 with connection.transaction(), connection.cursor() as cursor:
                     cursor.execute(
-                        "SELECT attempt_id, envelope FROM projection_redrive_attempt WHERE published_at IS NULL "
+                        "SELECT attempt_id, envelope FROM projection_redrive_attempt WHERE status='pending' "
                         "ORDER BY requested_at LIMIT 50 FOR UPDATE SKIP LOCKED"
                     )
                     pending = cursor.fetchall()
@@ -89,16 +114,69 @@ async def run_redrive_outbox() -> None:
                             headers=[("thyphon-redrive-attempt", str(attempt["attempt_id"]).encode())],
                         )
                         cursor.execute(
-                            "UPDATE projection_redrive_attempt SET published_at=NOW() WHERE attempt_id=%s",
+                            "UPDATE projection_redrive_attempt SET published_at=NOW(), status='published' "
+                            "WHERE attempt_id=%s AND status='pending'",
                             (attempt["attempt_id"],),
                         )
-            except Exception:
+            except Exception as error:
+                _close_quietly(connection)
+                connection = None
+                print(f"redrive dispatcher reconnecting after {type(error).__name__}: {error}", file=sys.stderr)
                 await asyncio.sleep(1.0)
                 continue
             await asyncio.sleep(0.1)
     finally:
         await producer.stop()
-        connection.close()
+        _close_quietly(connection)
+
+
+async def run_dead_letter_outbox() -> None:
+    """Publish bounded dead-letter references after quarantine is durable."""
+    psycopg, _, producer_type = _runtime()
+    dsn = os.environ["THYPHON_DATABASE_URL"]
+    bootstrap = os.environ["THYPHON_KAFKA_BOOTSTRAP"]
+    producer = producer_type(bootstrap_servers=bootstrap, acks="all")
+    await producer.start()
+    connection: Any | None = None
+    try:
+        while True:
+            try:
+                if connection is None:
+                    connection = psycopg.connect(dsn, row_factory=psycopg.rows.dict_row, autocommit=True)
+                with connection.transaction(), connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT dead_letter_id, consumer_name, source_topic, partition_id, message_offset, "
+                        "canonical_event_id, candidate_event_id, raw_sha256, raw_size, preview_base64, last_error "
+                        "FROM projection_dead_letter_outbox WHERE published_at IS NULL "
+                        "ORDER BY created_at LIMIT 50 FOR UPDATE SKIP LOCKED"
+                    )
+                    for row in cursor.fetchall():
+                        payload = {
+                            "dead_letter_id": str(row["dead_letter_id"]), "consumer": row["consumer_name"],
+                            "source": {"topic": row["source_topic"], "partition": row["partition_id"], "offset": row["message_offset"]},
+                            "canonical_event_id": None if row["canonical_event_id"] is None else str(row["canonical_event_id"]),
+                            "candidate_event_id": None if row["candidate_event_id"] is None else str(row["candidate_event_id"]),
+                            "raw_sha256": row["raw_sha256"], "raw_size": row["raw_size"],
+                            "preview_base64": row["preview_base64"], "error": row["last_error"],
+                        }
+                        await producer.send_and_wait(
+                            "thyphon.domain-events-dlq", key=str(row["dead_letter_id"]).encode(),
+                            value=json.dumps(payload, sort_keys=True).encode(),
+                        )
+                        cursor.execute(
+                            "UPDATE projection_dead_letter_outbox SET published_at=NOW() WHERE dead_letter_id=%s",
+                            (row["dead_letter_id"],),
+                        )
+            except Exception as error:
+                _close_quietly(connection)
+                connection = None
+                print(f"dead-letter dispatcher reconnecting after {type(error).__name__}: {error}", file=sys.stderr)
+                await asyncio.sleep(1.0)
+                continue
+            await asyncio.sleep(0.1)
+    finally:
+        await producer.stop()
+        _close_quietly(connection)
 
 
 def _parse_envelope(raw_value: bytes | None) -> dict[str, Any]:
@@ -136,17 +214,24 @@ def _is_infrastructure_error(error: Exception) -> bool:
     }
 
 
-def _redrive_delivery_requires_rebuild(*, attempt_resolved_at: Any, failure_resolved_at: Any) -> bool:
+def _redrive_delivery_requires_rebuild(
+    *, attempt_status: str, failure_resolved_at: Any, active_attempt_id: Any, attempt_id: UUID,
+) -> bool:
     """Classify a verified redrive delivery while its state rows are locked.
 
-    Kafka may redeliver an attempt after the first delivery has completed.  That
-    is a successful no-op, whereas an unresolved attempt with a resolved
-    failure is an inconsistent control-plane state and must not rebuild.
+    A pending attempt can legitimately arrive before the dispatcher persists
+    ``published_at``. Kafka may also redeliver completed or failed attempts;
+    both are successful no-ops. Only the one active pending/published attempt
+    is allowed to repair an unresolved failure.
     """
-    if attempt_resolved_at is not None:
+    if attempt_status in {"resolved", "failed", "superseded"}:
         return False
+    if attempt_status not in {"pending", "published"}:
+        raise ValueError("Kafka redrive attempt has an unknown lifecycle state")
     if failure_resolved_at is not None:
         raise ValueError("Kafka redrive attempt is inactive because its failure is already resolved")
+    if str(active_attempt_id) != str(attempt_id):
+        raise ValueError("Kafka redrive attempt is no longer active for this failure")
     return True
 
 
@@ -157,27 +242,28 @@ def _locked_active_redrive_attempt(
     """Lock and classify the exact redrive attempt allowed to repair an aggregate."""
     with failure_store.transaction(), failure_store.cursor() as cursor:
         cursor.execute(
-            "SELECT a.resolved_at AS attempt_resolved_at, f.resolved_at AS failure_resolved_at "
+            "SELECT a.status, f.resolved_at AS failure_resolved_at, f.active_redrive_attempt_id "
             "FROM projection_redrive_attempt a "
-            "JOIN projection_failure f ON f.active_redrive_attempt_id=a.attempt_id "
+            "JOIN projection_failure f ON f.consumer_name=a.consumer_name AND f.event_id=a.event_id "
             "WHERE a.attempt_id=%s AND a.consumer_name=%s AND a.event_id=%s "
-            "AND f.consumer_name=%s AND f.event_id=%s "
             "FOR UPDATE OF a, f",
-            (attempt_id, consumer_name, event_id, consumer_name, event_id),
+            (attempt_id, consumer_name, event_id),
         )
         attempt = cursor.fetchone()
         if attempt is None:
             raise ValueError("Kafka redrive attempt is unknown or belongs to another event")
         requires_rebuild = _redrive_delivery_requires_rebuild(
-            attempt_resolved_at=attempt[0],
+            attempt_status=attempt[0],
             failure_resolved_at=attempt[1],
+            active_attempt_id=attempt[2],
+            attempt_id=attempt_id,
         )
         yield requires_rebuild
         if not requires_rebuild:
             return
         cursor.execute(
-            "UPDATE projection_redrive_attempt SET resolved_at=NOW() "
-            "WHERE attempt_id=%s AND consumer_name=%s AND event_id=%s AND resolved_at IS NULL",
+            "UPDATE projection_redrive_attempt SET resolved_at=NOW(), status='resolved', last_error=NULL "
+            "WHERE attempt_id=%s AND consumer_name=%s AND event_id=%s AND status IN ('pending', 'published')",
             (attempt_id, consumer_name, event_id),
         )
         cursor.execute(
@@ -187,15 +273,22 @@ def _locked_active_redrive_attempt(
         )
 
 
-async def _quarantine(
-    *, message: Any, envelope: dict[str, Any] | None, error: Exception, event_id: UUID | None,
+def _dead_letter_preview(raw_value: bytes | None, limit: int = 3072) -> str | None:
+    if raw_value is None:
+        return None
+    return base64.b64encode(raw_value[:limit]).decode()
+
+
+def _quarantine(
+    *, message: Any, error: Exception, event_id: UUID | None,
     candidate_event_id: UUID | None,
-    failure_store: Any, producer: Any, consumer_name: str,
+    redrive_attempt: UUID | None, failure_store: Any, consumer_name: str,
 ) -> None:
-    """Quarantine every malformed record, even when it has no usable event_id."""
+    """Persist quarantine and a bounded DLQ publication intent atomically."""
     raw_value = message.value
-    if event_id is None:
-        with failure_store.transaction(), failure_store.cursor() as cursor:
+    raw_sha256 = hashlib.sha256(raw_value or b"").hexdigest()
+    with failure_store.transaction(), failure_store.cursor() as cursor:
+        if event_id is None:
             cursor.execute(
                 "INSERT INTO projection_raw_failure(consumer_name, topic, partition_id, message_offset, raw_value, attempts, last_error, quarantined_at) "
                 "VALUES (%s, %s, %s, %s, %s, 1, %s, NOW()) "
@@ -203,8 +296,7 @@ async def _quarantine(
                 "SET attempts=projection_raw_failure.attempts+1, last_error=EXCLUDED.last_error, quarantined_at=NOW()",
                 (consumer_name, message.topic, message.partition, message.offset, raw_value, str(error)[:1000]),
             )
-    else:
-        with failure_store.transaction(), failure_store.cursor() as cursor:
+        else:
             cursor.execute(
                 "INSERT INTO projection_failure(consumer_name, event_id, attempts, last_error, quarantined_at) "
                 "VALUES (%s, %s, 3, %s, NOW()) "
@@ -212,16 +304,31 @@ async def _quarantine(
                 "SET attempts=projection_failure.attempts+1, last_error=EXCLUDED.last_error, quarantined_at=NOW()",
                 (consumer_name, event_id, str(error)[:1000]),
             )
-    dead_letter = {
-        "consumer": consumer_name, "error": str(error), "topic": message.topic,
-        "partition": message.partition, "offset": message.offset, "envelope": envelope,
-        "candidate_event_id": None if candidate_event_id is None else str(candidate_event_id),
-        "raw_value_base64": None if raw_value is None else base64.b64encode(raw_value).decode(),
-    }
-    key = str(event_id or f"{message.topic}:{message.partition}:{message.offset}").encode()
-    await producer.send_and_wait(
-        "thyphon.domain-events-dlq", key=key, value=json.dumps(dead_letter, sort_keys=True).encode(),
-    )
+        cursor.execute(
+            "INSERT INTO projection_dead_letter_outbox("
+            "dead_letter_id, consumer_name, source_topic, partition_id, message_offset, canonical_event_id, "
+            "candidate_event_id, raw_sha256, raw_size, preview_base64, last_error) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (consumer_name, source_topic, partition_id, message_offset) DO UPDATE "
+            "SET canonical_event_id=EXCLUDED.canonical_event_id, candidate_event_id=EXCLUDED.candidate_event_id, "
+            "raw_sha256=EXCLUDED.raw_sha256, raw_size=EXCLUDED.raw_size, preview_base64=EXCLUDED.preview_base64, "
+            "last_error=EXCLUDED.last_error",
+            (
+                uuid4(), consumer_name, message.topic, message.partition, message.offset, event_id, candidate_event_id,
+                raw_sha256, len(raw_value or b""), _dead_letter_preview(raw_value), str(error)[:1000],
+            ),
+        )
+        if redrive_attempt is not None and event_id is not None:
+            cursor.execute(
+                "UPDATE projection_redrive_attempt SET status='failed', last_error=%s "
+                "WHERE attempt_id=%s AND consumer_name=%s AND event_id=%s AND status IN ('pending', 'published')",
+                (str(error)[:1000], redrive_attempt, consumer_name, event_id),
+            )
+            cursor.execute(
+                "UPDATE projection_failure SET active_redrive_attempt_id=NULL "
+                "WHERE consumer_name=%s AND event_id=%s AND active_redrive_attempt_id=%s AND resolved_at IS NULL",
+                (consumer_name, event_id, redrive_attempt),
+            )
 
 
 def _request_settlement_for_winning_bid(settlements: SettlementCommandHandler, canonical: Any) -> None:
@@ -244,20 +351,22 @@ def _request_settlement_for_winning_bid(settlements: SettlementCommandHandler, c
 
 
 async def run_projection() -> None:
-    psycopg, consumer_type, producer_type = _runtime()
+    _, consumer_type, _ = _runtime()
+    try:
+        from psycopg_pool import ConnectionPool
+    except ImportError as error:  # pragma: no cover - runtime extra
+        raise RuntimeError("Install Thyphon with the 'runtime' extra") from error
     bootstrap = os.environ["THYPHON_KAFKA_BOOTSTRAP"]
     dsn = os.environ["THYPHON_DATABASE_URL"]
     projector = PostgresAuctionOverviewProjector(dsn)
     settlement_store = PostgresEventStore(dsn)
     settlements = SettlementCommandHandler(settlement_store)
-    failure_store = psycopg.connect(dsn, autocommit=True)
-    dlq_producer = producer_type(bootstrap_servers=bootstrap, acks="all")
+    failure_pool: Any = ConnectionPool(conninfo=dsn, min_size=1, max_size=4, kwargs={"autocommit": True}, open=True)
     consumer = consumer_type(
         "thyphon.domain-events", bootstrap_servers=bootstrap, group_id="thyphon-auction-overview-v1",
         enable_auto_commit=False, auto_offset_reset="earliest",
     )
     await consumer.start()
-    await dlq_producer.start()
     try:
         infrastructure_retries: dict[tuple[str, int, int], int] = {}
         async for message in consumer:
@@ -279,15 +388,16 @@ async def run_projection() -> None:
                         recorded = canonical.recorded
                         canonical_event_id = recorded.event.event_id
                         if redrive_attempt is not None and recorded.stream_id.startswith("auction:"):
-                            with _locked_active_redrive_attempt(
-                                failure_store, attempt_id=redrive_attempt, consumer_name=projector.consumer_name,
-                                event_id=canonical_event_id,
-                            ) as requires_rebuild:
-                                if not requires_rebuild:
-                                    failure = None
-                                    break
-                                projector.rebuild_stream(recorded.stream_id)
-                                _request_settlement_for_winning_bid(settlements, canonical)
+                            with failure_pool.connection() as failure_store:
+                                with _locked_active_redrive_attempt(
+                                    failure_store, attempt_id=redrive_attempt, consumer_name=projector.consumer_name,
+                                    event_id=canonical_event_id,
+                                ) as requires_rebuild:
+                                    if not requires_rebuild:
+                                        failure = None
+                                        break
+                                    projector.rebuild_stream(recorded.stream_id)
+                                    _request_settlement_for_winning_bid(settlements, canonical)
                         else:
                             projector.apply(recorded)
                             _request_settlement_for_winning_bid(settlements, canonical)
@@ -315,22 +425,46 @@ async def run_projection() -> None:
                 continue
             infrastructure_retries.pop((message.topic, message.partition, message.offset), None)
             if failure is not None:
-                await _quarantine(
-                    message=message, envelope=envelope, error=failure, event_id=canonical_event_id,
-                    candidate_event_id=candidate_event_id,
-                    failure_store=failure_store, producer=dlq_producer, consumer_name=projector.consumer_name,
-                )
-            with failure_store.transaction(), failure_store.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO process_checkpoint(process_name, last_observed_at) VALUES (%s, NOW()) "
-                    "ON CONFLICT (process_name) DO UPDATE SET last_observed_at=EXCLUDED.last_observed_at",
-                    (projector.consumer_name,),
-                )
+                try:
+                    with failure_pool.connection() as failure_store:
+                        _quarantine(
+                            message=message, error=failure, event_id=canonical_event_id,
+                            candidate_event_id=candidate_event_id,
+                            redrive_attempt=redrive_attempt, failure_store=failure_store,
+                            consumer_name=projector.consumer_name,
+                        )
+                except Exception as quarantine_error:
+                    if _is_infrastructure_error(quarantine_error):
+                        retry_key = (message.topic, message.partition, message.offset)
+                        retry_count = infrastructure_retries.get(retry_key, 0) + 1
+                        infrastructure_retries[retry_key] = retry_count
+                        await asyncio.sleep(min(30.0, 0.25 * (2 ** (retry_count - 1))))
+                        from aiokafka import TopicPartition
+                        consumer.seek(TopicPartition(message.topic, message.partition), message.offset)
+                        continue
+                    raise
+            try:
+                with failure_pool.connection() as failure_store:
+                    with failure_store.transaction(), failure_store.cursor() as cursor:
+                        cursor.execute(
+                            "INSERT INTO process_checkpoint(process_name, last_observed_at) VALUES (%s, NOW()) "
+                            "ON CONFLICT (process_name) DO UPDATE SET last_observed_at=EXCLUDED.last_observed_at",
+                            (projector.consumer_name,),
+                        )
+            except Exception as checkpoint_error:
+                if _is_infrastructure_error(checkpoint_error):
+                    retry_key = (message.topic, message.partition, message.offset)
+                    retry_count = infrastructure_retries.get(retry_key, 0) + 1
+                    infrastructure_retries[retry_key] = retry_count
+                    await asyncio.sleep(min(30.0, 0.25 * (2 ** (retry_count - 1))))
+                    from aiokafka import TopicPartition
+                    consumer.seek(TopicPartition(message.topic, message.partition), message.offset)
+                    continue
+                raise
             await consumer.commit()
     finally:
         await consumer.stop()
-        await dlq_producer.stop()
-        failure_store.close()
+        failure_pool.close()
         settlement_store.close()
         projector.close()
 
@@ -341,10 +475,12 @@ def main() -> None:
         asyncio.run(run_outbox())
     elif mode == "redrive-outbox":
         asyncio.run(run_redrive_outbox())
+    elif mode == "dead-letter-outbox":
+        asyncio.run(run_dead_letter_outbox())
     elif mode == "projection":
         asyncio.run(run_projection())
     else:
-        raise SystemExit("usage: python -m thyphon.workers.main {outbox|redrive-outbox|projection}")
+        raise SystemExit("usage: python -m thyphon.workers.main {outbox|redrive-outbox|dead-letter-outbox|projection}")
 
 
 if __name__ == "__main__":

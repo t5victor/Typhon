@@ -317,6 +317,19 @@ duplicado de un intento ya resuelto se confirma como no-op, mientras que un ID
 desconocido o asociado a otro evento se pone en cuarentena. Los receipts se
 escriben solo después de una transición de proyección efectiva.
 
+La máquina de estados del intento es persistente: `pending → published →
+resolved` o `failed`; una migración puede marcar un intento histórico
+duplicado como `superseded`. Solo puede existir un intento `pending` o
+`published` por fallo. El operador y el motivo quedan registrados y una nueva
+solicitud mientras ya hay un intento activo devuelve ese mismo intento.
+
+La cuarentena y su publicación también están separadas. El consumer persiste
+el fallo y una fila de `projection_dead_letter_outbox` en la misma transacción;
+el dispatcher de DLQ publica después solo una referencia acotada (ID, hash,
+tamaño y preview). El raw completo vive exclusivamente en PostgreSQL para los
+fallos no canónicos, de modo que un poison message grande no puede bloquear su
+partición al exceder el límite de Kafka.
+
 ## 10. Query side y consistencia eventual
 
 La proyección PostgreSQL `auction_overview` contiene una forma optimizada para
@@ -403,6 +416,7 @@ api               FastAPI
 outbox-worker     publicación fiable hacia Kafka
 projection-worker proyección y process manager
 redrive-outbox-worker publicación durable de intentos de redrive
+dead-letter-outbox-worker publicación durable y acotada de cuarentenas
 ```
 
 Los health checks representan dependencias reales: PostgreSQL debe aceptar
@@ -456,6 +470,9 @@ ocurrido si no hay evidencia de una corrida concreta.
 | Receipt antes de transición | Un gap podía quedar marcado para siempre | Versiones consecutivas, receipt posterior y rebuild por stream durante redrive. |
 | Carrera ACK Kafka / `published_at` | Un redrive válido podía entrar en DLQ | El consumer bloquea y valida el intento activo sin prefiltrar por `published_at`; la entrega es la prueba de publicación. |
 | Duplicado de redrive resuelto | At-least-once creaba un poison event artificial | Un intento resuelto se reconoce como no-op y confirma el offset sin rebuild. |
+| Poison grande en DLQ | Un `send` sobredimensionado bloqueaba la partición | Outbox de DLQ transaccional: el broker recibe referencia/hash/preview, nunca el raw completo. |
+| Reinicio PostgreSQL | Dispatchers vivos retenían una conexión rota | Conexión descartada y recreada tras cada error de infraestructura. |
+| Réplicas de outbox | `SKIP LOCKED` podía publicar N+1 antes de N | Advisory lock transaccional para un único dispatcher lógico y orden global. |
 | HMAC sin vida útil | Replays temporales de callback | Timestamp firmado y ventana de cinco minutos. |
 | `.env` en build context | Exposición en builder/cache remoto | Exclusiones explícitas en `.dockerignore`. |
 | Simulación releyendo historial completo | Coste cuadrático en sesiones largas | Cursor por posición global y contador SQL. |

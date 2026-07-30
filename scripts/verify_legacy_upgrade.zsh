@@ -12,11 +12,21 @@ legacy_event="00000000-0000-4000-8000-000000000005"
 legacy_settlement_stream="legacy-upgrade-settlement"
 legacy_settlement_event="00000000-0000-4000-8000-000000000006"
 
+# This script deliberately runs while only PostgreSQL is up. It seeds the old
+# outbox shape, migrates it, and leaves delivery verification to the separate
+# post-worker script. No worker can publish the incomplete envelope meanwhile.
+docker compose run --rm --no-deps api python -m thyphon.infrastructure.migrate
+
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U thyphon -d thyphon <<SQL
 TRUNCATE transactional_outbox, command_receipt, event_stream_head, event_stream,
   provider_reference_claim, settlement_causation_claim, projection_receipt, projection_failure,
-  projection_raw_failure, projection_redrive_attempt;
-DELETE FROM schema_migration WHERE migration_id IN ('005_namespace_legacy_streams_and_outbox', '006_bind_idempotency_receipts_to_actor_and_tenant', '007_claim_each_winning_bid_once', '008_track_dlq_redrives');
+  projection_raw_failure, projection_dead_letter_outbox, projection_redrive_attempt;
+DELETE FROM schema_migration WHERE migration_id IN (
+  '005_namespace_legacy_streams_and_outbox', '006_bind_idempotency_receipts_to_actor_and_tenant',
+  '007_claim_each_winning_bid_once', '008_track_dlq_redrives', '009_validate_causality_and_redrive_outbox',
+  '010_bind_settlement_causality_to_winning_bid_facts', '011_verify_historic_settlement_causal_payload_binding',
+  '012_harden_redrive_lifecycle_and_dead_letter_outbox'
+);
 INSERT INTO event_stream(event_id, stream_id, stream_version, event_name, payload, occurred_at, schema_version, correlation_id)
 VALUES ('$legacy_event', '$legacy_stream', 1, 'AuctionOpened',
   '{"event_id":"$legacy_event","occurred_at":"2026-01-01T00:00:00+00:00","resource":"Copper","quantity":4,"reserve_price":"101.00"}'::jsonb,
@@ -39,7 +49,7 @@ INSERT INTO transactional_outbox(event_id, topic, partition_key, body)
 VALUES ('$legacy_settlement_event', 'thyphon.domain-events', '$legacy_settlement_stream', '{"event_id":"$legacy_settlement_event","stream_id":"$legacy_settlement_stream"}'::jsonb);
 SQL
 
-docker compose exec -T api python -m thyphon.infrastructure.migrate
+docker compose run --rm --no-deps api python -m thyphon.infrastructure.migrate
 
 stream_count="$(docker compose exec -T postgres psql -U thyphon -d thyphon -Atc "SELECT count(*) FROM event_stream WHERE stream_id='auction:${legacy_stream}'")"
 head_count="$(docker compose exec -T postgres psql -U thyphon -d thyphon -Atc "SELECT count(*) FROM event_stream_head WHERE stream_id='auction:${legacy_stream}'")"

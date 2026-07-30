@@ -9,7 +9,7 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-required_services=(postgres kafka api outbox-worker projection-worker redrive-outbox-worker)
+required_services=(postgres kafka api outbox-worker projection-worker redrive-outbox-worker dead-letter-outbox-worker)
 running_services=("${(@f)$(docker compose ps --status running --services)}")
 missing_services=()
 
