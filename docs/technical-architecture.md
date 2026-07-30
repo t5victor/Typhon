@@ -256,7 +256,10 @@ delivery is then verified.
 The TUI stays independent of this topology. It is a deterministic SQLite
 simulator, not an operations console for Compose: it neither reads nor controls
 PostgreSQL, Kafka, API or worker state. `launch_simulator.zsh` starts that local
-simulation; `launch_distributed_runtime.zsh` starts the Compose runtime.
+simulation; `launch_distributed_runtime.zsh` starts the Compose runtime. Its
+market tape uses seeded log returns, correlated shocks and short-lived regimes.
+Downward regimes are more likely than relief rallies; asymmetric valuation drag
+and a recovery floor prevent unbounded appreciation or collapse.
 
 ## Security model
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from math import exp, log
 from random import Random
 
 from thyphon.auction.domain.auction import Auction
@@ -32,9 +33,22 @@ class CompanyPulse:
     last_action: str = "observing market"
 
 
+@dataclass(frozen=True)
+class MarketRegime:
+    name: str
+    drift: float
+    volatility: float
+
+
 class DeterministicMarket:
     _tape_limit = 240
     _published_limit = 64
+    _floor_ratio = 0.35
+    _regimes = (
+        (0.52, MarketRegime("RISK-OFF", -0.0040, 0.0100)),
+        (0.32, MarketRegime("CAUTIOUS", -0.0008, 0.0070)),
+        (0.16, MarketRegime("RELIEF RALLY", 0.0024, 0.0060)),
+    )
 
     def __init__(self, seed: int) -> None:
         self.seed = seed
@@ -57,6 +71,8 @@ class DeterministicMarket:
         self.opening_prices = dict(self.prices)
         self.price_history = {resource: [price] for resource, price in self.prices.items()}
         self.last_moves = {resource: Decimal("0") for resource in self.prices}
+        self.market_regime = self._regimes[0][1]
+        self._regime_ticks_remaining = 0
         self.companies = {
             "Astra Industries": CompanyPulse("Astra Industries", "AGGRESSIVE", Decimal("0.85"), Decimal("12.3")),
             "Helios Dynamics": CompanyPulse("Helios Dynamics", "MOMENTUM", Decimal("0.72"), Decimal("8.4")),
@@ -156,19 +172,46 @@ class DeterministicMarket:
         return candidates[self.random.randrange(len(candidates))] if candidates else "Nova Corp"
 
     def _move_prices(self) -> None:
+        self._advance_regime()
+        common_shock = self.random.gauss(0.0, self.market_regime.volatility * 0.45)
         for resource, price in self.prices.items():
-            basis_points = self.random.randint(-120, 180)
-            move = Decimal(basis_points) / Decimal("100")
+            opening = float(self.opening_prices[resource])
+            current = float(price)
+            relative_value = current / opening
+            # The simulator uses a negatively biased log return. Rallies are
+            # possible, especially during relief regimes, but expensive assets
+            # receive valuation drag while severely depressed ones recover from
+            # a floor instead of collapsing to zero.
+            valuation_drag = -0.035 * max(log(relative_value), 0.0)
+            floor_support = 0.025 * max(log(self._floor_ratio / relative_value), 0.0)
+            idiosyncratic_shock = self.random.gauss(0.0, self.market_regime.volatility * 0.75)
+            log_return = self.market_regime.drift + common_shock + idiosyncratic_shock + valuation_drag + floor_support
+            log_return = max(-0.065, min(0.050, log_return))
+            next_price = Decimal(str(current * exp(log_return))).quantize(Decimal("0.01"))
+            move = ((next_price / price) - Decimal("1")) * Decimal("100")
             self.last_moves[resource] = move
-            self.prices[resource] = max(Decimal("0.01"), price * (Decimal("1") + move / Decimal("100"))).quantize(Decimal("0.01"))
+            self.prices[resource] = max(Decimal("0.01"), next_price)
             self.price_history[resource].append(self.prices[resource])
             self.price_history[resource] = self.price_history[resource][-36:]
+
+    def _advance_regime(self) -> None:
+        if self._regime_ticks_remaining > 0:
+            self._regime_ticks_remaining -= 1
+            return
+        draw = self.random.random()
+        cumulative = 0.0
+        for probability, regime in self._regimes:
+            cumulative += probability
+            if draw < cumulative:
+                self.market_regime = regime
+                break
+        self._regime_ticks_remaining = self.random.randint(4, 11)
 
     def _market_note(self) -> str:
         strongest = max(self.last_moves, key=lambda resource: abs(self.last_moves[resource]))
         move = self.last_moves[strongest]
         direction = "demand pulse" if move > 0 else "supply pressure"
-        return f"{strongest} {direction} {move:+.2f}%"
+        return f"{self.market_regime.name}: {strongest} {direction} {move:+.2f}%"
 
     def price_change(self, resource: str) -> Decimal:
         return ((self.prices[resource] / self.opening_prices[resource]) - Decimal("1")) * Decimal("100")

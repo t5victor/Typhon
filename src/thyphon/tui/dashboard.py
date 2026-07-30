@@ -79,6 +79,7 @@ def render(market: DeterministicMarket, width: int | None = None, colour: bool =
     ), Ink.green)
     health_panel = Panel("SIMULATION STATUS", (
         "Runtime      deterministic SQLite",
+        f"Regime       {market.market_regime.name}",
         f"Events       {market.store.event_count():>4}",
         f"Messages     {market.published_count:>4}",
         "Projection   idempotent",

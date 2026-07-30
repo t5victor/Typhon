@@ -102,6 +102,7 @@ def _system_panel(screen, market: DeterministicMarket, top: int, left: int, widt
     rows = (
         ("SIMULATION", "PAUSED" if paused else "RUNNING", Colour.AMBER if paused else Colour.POSITIVE),
         ("TICK RATE", f"{1 / interval:4.1f}/sec", Colour.ACCENT),
+        ("REGIME", market.market_regime.name, Colour.NEGATIVE if market.market_regime.drift < 0 else Colour.POSITIVE),
         ("EVENTS", f"{events:>8}", Colour.FRAME),
         ("SIM OUTBOX", f"{market.published_count:>5} sent", Colour.POSITIVE),
         ("SIM PROJECTION", "caught up", Colour.POSITIVE),
