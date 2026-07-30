@@ -14,6 +14,10 @@
 | Settlement | late confirmation | `LateSettlementDetected`, `RefundRequested` | Rejected money enters compensation. |
 | Settlement | `CompleteRefund`, `FailRefund` | `RefundCompleted`, `RefundFailed` | The compensation reaches a terminal result. |
 
+`Company` events belong to an experimental aggregate. They are documented here
+for replay compatibility but are not a public bidding or capital-reservation
+workflow.
+
 ## Naming
 
 Commands name decisions. Events name facts. Avoid mechanical names such as
