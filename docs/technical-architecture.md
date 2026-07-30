@@ -253,8 +253,10 @@ delivery is then verified.
 | redrive-outbox-worker | redrive attempt publication |
 | dead-letter-outbox-worker | bounded DLQ reference publication |
 
-The TUI stays independent of this topology. It uses a deterministic SQLite
-simulator so a seed can reproduce a market session without containers.
+The TUI stays independent of this topology. It is a deterministic SQLite
+simulator, not an operations console for Compose: it neither reads nor controls
+PostgreSQL, Kafka, API or worker state. `launch_simulator.zsh` starts that local
+simulation; `launch_distributed_runtime.zsh` starts the Compose runtime.
 
 ## Security model
 

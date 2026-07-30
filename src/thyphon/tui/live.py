@@ -87,7 +87,7 @@ def _market_panel(screen, market: DeterministicMarket, top: int, left: int, widt
 
 
 def _auction_panel(screen, market: DeterministicMarket, top: int, left: int, width: int) -> None:
-    _box(screen, top, left, 8, width, "LIVE AUCTION #381", Colour.POSITIVE)
+    _box(screen, top, left, 8, width, "SIMULATED AUCTION #381", Colour.POSITIVE)
     overview = market.projector.overview("auction-lithium-381")
     _add(screen, top + 1, left + 2, "LOT       Lithium / 1,200 units")
     _add(screen, top + 2, left + 2, f"RESERVE   {overview['reserve_price']:>10} EUR")
@@ -97,13 +97,13 @@ def _auction_panel(screen, market: DeterministicMarket, top: int, left: int, wid
 
 
 def _system_panel(screen, market: DeterministicMarket, top: int, left: int, width: int, interval: float, paused: bool) -> None:
-    _box(screen, top, left, 8, width, "OPERATIONS", Colour.AMBER)
+    _box(screen, top, left, 8, width, "SIMULATION STATUS", Colour.AMBER)
     events = market.store.event_count()
     rows = (
         ("SIMULATION", "PAUSED" if paused else "RUNNING", Colour.AMBER if paused else Colour.POSITIVE),
         ("TICK RATE", f"{1 / interval:4.1f}/sec", Colour.ACCENT),
         ("EVENTS", f"{events:>8}", Colour.FRAME),
-        ("LOCAL OUTBOX", f"{market.published_count:>5} sent", Colour.POSITIVE),
+        ("SIM OUTBOX", f"{market.published_count:>5} sent", Colour.POSITIVE),
         ("SIM PROJECTION", "caught up", Colour.POSITIVE),
     )
     for offset, (label, value, colour) in enumerate(rows, start=1):
@@ -139,7 +139,7 @@ def _draw(screen, market: DeterministicMarket, interval: float, paused: bool) ->
         _add(screen, 3, 2, f"Current size: {width}x{height}. Press q to quit.", Colour.MUTED)
         screen.refresh()
         return
-    title = f" THYPHON :: LIVE MARKET OPERATIONS :: SEED {market.seed:05d} :: TICK {market.tick:04d} "
+    title = f" THYPHON :: LOCAL MARKET SIMULATION :: SEED {market.seed:05d} :: TICK {market.tick:04d} "
     _add(screen, 0, 0, " " * (width - 1), Colour.TITLE)
     _add(screen, 0, max(1, (width - len(title)) // 2), title, Colour.TITLE, True)
     third = (width - 8) // 3

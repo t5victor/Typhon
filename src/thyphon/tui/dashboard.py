@@ -60,7 +60,7 @@ def render(market: DeterministicMarket, width: int | None = None, colour: bool =
     header = [
         Ink.cyan + "+" + line + "+" + Ink.reset,
         "|" + fit(
-            f"{Ink.bold}THYPHON{Ink.reset} :: MARKET OPERATIONS".ljust(width - 38)
+            f"{Ink.bold}THYPHON{Ink.reset} :: LOCAL MARKET SIMULATION".ljust(width - 38)
             + f"SEED {market.seed:05d} :: TICK {market.tick:04d}", width - 2
         ) + "|",
         Ink.cyan + "+" + line + "+" + Ink.reset,
@@ -71,14 +71,14 @@ def render(market: DeterministicMarket, width: int | None = None, colour: bool =
         f"Copper    {market.prices['Copper']:>8.2f} EUR {market.price_change('Copper'):+6.2f}%",
         f"Titanium  {market.prices['Titanium']:>8.2f} EUR {market.price_change('Titanium'):+6.2f}%",
     ))
-    auction_panel = Panel("LIVE AUCTION", (
+    auction_panel = Panel("SIMULATED AUCTION", (
         "#381  Lithium / 1,200 units",
         f"Reserve      {overview['reserve_price']:>12} EUR",
         f"Leader       {(overview['leading_company_id'] or '-'):>12}",
         f"Offer        {(overview['leading_offer'] or '-'):>12} EUR",
     ), Ink.green)
-    health_panel = Panel("SYSTEM HEALTH", (
-        "Runtime      local simulator",
+    health_panel = Panel("SIMULATION STATUS", (
+        "Runtime      deterministic SQLite",
         f"Events       {market.store.event_count():>4}",
         f"Messages     {market.published_count:>4}",
         "Projection   idempotent",

@@ -4,6 +4,9 @@ Thyphon is an event-sourced commodity auction simulator. Autonomous companies
 compete for finite mineral lots while the system handles optimistic conflicts,
 idempotent commands, asynchronous projections and at-least-once delivery.
 
+**Status: 0.3.0 beta.** It is a technical laboratory, not a production-ready
+marketplace or a stable financial-service release.
+
 The terminal UI runs a deterministic market tape with competing bidders, moving prices and
 operational counters. The backend keeps the same concerns explicit in PostgreSQL and Kafka.
 
@@ -102,15 +105,18 @@ docker compose down
 Use `docker compose down -v` only when deliberately discarding local event
 history.
 
-## Operations
+## Entry points
 
 ```bash
-./scripts/launch_thyphon.zsh
+# Deterministic SQLite simulator only; does not start or observe Docker.
+zsh scripts/launch_simulator.zsh
+
+# PostgreSQL, Kafka, API and workers only; does not open the simulator.
+zsh scripts/launch_distributed_runtime.zsh
 ```
 
-The launcher checks Docker Desktop, starts missing Thyphon services and opens
-the ASCII console in a separate terminal. It keeps the Compose volume between
-starts.
+`launch_thyphon.zsh` remains as a compatibility alias for the distributed
+runtime launcher. It no longer opens the simulator automatically.
 
 Useful entry points:
 
