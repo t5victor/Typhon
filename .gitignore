@@ -7,5 +7,6 @@ bazel-*
 .thyphon/
 .env
 .env.*
+INTENT.md
 build/
 *.egg-info/
