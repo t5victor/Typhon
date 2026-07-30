@@ -99,6 +99,6 @@ Useful entry points:
 
 - [event catalog](docs/event-catalog.md)
 - [architecture decision](docs/adr/0001-intention-led-event-sourcing.md)
-- [technical architecture](TECHNICAL.md)
+- [technical architecture](docs/technical-architecture.md)
 - [security policy](SECURITY.md)
 - [contributing guide](CONTRIBUTING.md)
