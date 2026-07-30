@@ -22,6 +22,19 @@ class CanonicalEvent:
     tenant_id: str | None
 
 
+class CanonicalEventDecodeError(ValueError):
+    """The Event Store proved an event is authentic, but this reader cannot decode it.
+
+    Keeping the canonical ID lets the worker quarantine the fact in the
+    repairable failure lane. Treating it as arbitrary broker input would make
+    a rolling schema upgrade require a full rebuild merely to retry one row.
+    """
+
+    def __init__(self, event_id: UUID, error: ValueError) -> None:
+        super().__init__(str(error))
+        self.event_id = event_id
+
+
 _ENVELOPE_FIELDS = frozenset({
     "event_id", "event_name", "schema_version", "stream_id", "stream_version", "global_position",
     "occurred_at", "payload", "correlation_id", "causation_id", "actor_id", "tenant_id",
@@ -132,7 +145,10 @@ class PostgresEventStore:
             raise ValueError("domain-event envelope differs from its Event Store fact")
         if datetime.fromisoformat(envelope["occurred_at"]) != occurred_at:
             raise ValueError("domain-event envelope occurred_at differs from its Event Store fact")
-        recorded = self._recorded(stream_id, stream_version, event_name, payload, global_position, schema_version)
+        try:
+            recorded = self._recorded(stream_id, stream_version, event_name, payload, global_position, schema_version)
+        except ValueError as error:
+            raise CanonicalEventDecodeError(event_id, error) from error
         if recorded.event.event_id != event_id:
             raise ValueError("Event Store payload event_id differs from its Event Store row")
         return CanonicalEvent(recorded, correlation_id, causation_id, actor_id, tenant_id)

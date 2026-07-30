@@ -67,6 +67,10 @@ class Auction:
     def _record(self, event: DomainEvent) -> None:
         self._apply(event)
         self._uncommitted.append(event)
+        # A freshly handled command must observe the same version as a
+        # rehydrated aggregate. This matters for long-lived local simulations
+        # and for any command batch handled by one aggregate instance.
+        self.version += 1
 
     def _apply(self, event: DomainEvent) -> None:
         match event:

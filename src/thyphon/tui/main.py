@@ -26,7 +26,7 @@ def main() -> None:
         print(render(market, colour=not args.plain))
         return
     try:
-        curses.wrapper(run_live, market, args.ticks, max(0.02, args.interval))
+        curses.wrapper(run_live, market, args.ticks, max(0.02, args.interval), args.plain)
     except KeyboardInterrupt:
         print("\nThyphon simulation stopped by operator.")
 

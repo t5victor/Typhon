@@ -91,6 +91,17 @@ services:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
+  settlement-process-manager:
+    image: thyphon-api:local
+    command: ["python", "-m", "thyphon.workers.main", "settlement-process-manager"]
+    restart: unless-stopped
+    environment:
+      THYPHON_DATABASE_URL: postgresql://thyphon:thyphon@postgres:5432/thyphon
+      THYPHON_KAFKA_BOOTSTRAP: kafka:9092
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
   redrive-outbox-worker:
     image: thyphon-api:local
     command: ["python", "-m", "thyphon.workers.main", "redrive-outbox"]

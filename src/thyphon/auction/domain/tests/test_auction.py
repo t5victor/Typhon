@@ -3,6 +3,7 @@ from decimal import Decimal
 import unittest
 
 from thyphon.application.auction_commands import AuctionCommandHandler
+from thyphon.auction.domain.auction import Auction
 from thyphon.auction.domain.commands.expire_auction.command import ExpireAuction
 from thyphon.auction.domain.commands.open_auction.command import OpenAuction
 from thyphon.auction.domain.commands.place_competitive_bid.command import PlaceCompetitiveBid
@@ -55,6 +56,13 @@ class AuctionBehaviour(unittest.TestCase):
         self.commands.expire_auction(ExpireAuction("a-381", datetime.now(UTC)), delivery("expiry"))
         with self.assertRaisesRegex(DomainViolation, "open auction"):
             self.commands.place_competitive_bid(PlaceCompetitiveBid("a-381", "helios", Decimal("213")), delivery("late"))
+
+    def test_freshly_recorded_events_advance_the_in_memory_aggregate_version(self) -> None:
+        auction = Auction.rehydrate(stream_key("auction", "in-memory-version"), [])
+        auction.open("Copper", 1, Decimal("10.00"))
+        self.assertEqual(auction.version, 1)
+        auction.place_competitive_bid("astra", Decimal("11.00"))
+        self.assertEqual(auction.version, 2)
 
 
 if __name__ == "__main__":

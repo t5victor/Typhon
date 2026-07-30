@@ -46,7 +46,16 @@ MIGRATIONS = {
         ) THEN
           CREATE SEQUENCE event_stream_global_position_seq;
           ALTER TABLE event_stream ADD COLUMN global_position BIGINT;
-          UPDATE event_stream SET global_position=nextval('event_stream_global_position_seq') WHERE global_position IS NULL;
+          -- A legacy table has no append sequence to preserve. Assign a stable
+          -- order which never inverts events within one aggregate history.
+          WITH ordered AS (
+            SELECT event_id, row_number() OVER (ORDER BY stream_id, stream_version, event_id) AS position
+            FROM event_stream
+            WHERE global_position IS NULL
+          )
+          UPDATE event_stream e SET global_position=ordered.position
+          FROM ordered WHERE e.event_id=ordered.event_id;
+          PERFORM setval('event_stream_global_position_seq', COALESCE((SELECT MAX(global_position) FROM event_stream), 1), true);
           ALTER TABLE event_stream ALTER COLUMN global_position SET NOT NULL;
           ALTER TABLE event_stream ALTER COLUMN global_position SET DEFAULT nextval('event_stream_global_position_seq');
           CREATE UNIQUE INDEX event_stream_global_position_key ON event_stream(global_position);

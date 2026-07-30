@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.example
+INTENT.md
 __pycache__
 *.py[cod]
 .bazel

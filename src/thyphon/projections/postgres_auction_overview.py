@@ -128,7 +128,13 @@ class PostgresAuctionOverviewProjector:
             cursor.execute(
                 "SELECT event_id, stream_id, stream_version, event_name, payload, global_position, schema_version, "
                 "occurred_at, correlation_id, causation_id, actor_id, tenant_id "
-                "FROM event_stream WHERE stream_id LIKE 'auction:%' ORDER BY global_position"
+                # ``global_position`` is an ordering for delivery, not the
+                # source of truth for an aggregate's history. Legacy stores
+                # may have assigned it after the fact. Rebuild each stream in
+                # its canonical version order so a physical row order can
+                # never make v2 precede v1.
+                "FROM event_stream WHERE stream_id LIKE 'auction:%' "
+                "ORDER BY stream_id, stream_version"
             )
             history = cursor.fetchall()
             for raw_row in history:
@@ -196,27 +202,42 @@ class PostgresAuctionOverviewProjector:
 
     @staticmethod
     def _apply_to(cursor: Any, recorded: RecordedEvent, table: str) -> None:
+        """Apply one canonical event and require exactly one state transition.
+
+        Rebuild intentionally has the same gap semantics as live delivery.
+        Silently skipping a row would let a shadow table look healthy while it
+        has omitted a bid or an allocation.
+        """
         if not recorded.stream_id.startswith("auction:"):
             return
         auction_id = aggregate_id(recorded.stream_id, "auction")
         match recorded.event:
             case AuctionOpened(resource=resource, quantity=quantity, reserve_price=reserve):
+                if recorded.stream_version != 1:
+                    raise ProjectionGap(f"{recorded.stream_id} opened at version {recorded.stream_version}, expected 1")
                 cursor.execute(
-                    f"INSERT INTO {table} VALUES (%s, %s, %s, %s, NULL, NULL, 'open', %s) ON CONFLICT (auction_id) DO NOTHING",
+                    f"INSERT INTO {table} VALUES (%s, %s, %s, %s, NULL, NULL, 'open', %s)",
                     (auction_id, resource, quantity, reserve, recorded.stream_version),
                 )
             case CompetitiveBidPlaced(company_id=company, offer=offer):
                 cursor.execute(
-                    f"UPDATE {table} SET leading_company_id=%s, leading_offer=%s, stream_version=%s WHERE auction_id=%s AND stream_version < %s",
-                    (company, offer, recorded.stream_version, auction_id, recorded.stream_version),
+                    f"UPDATE {table} SET leading_company_id=%s, leading_offer=%s, stream_version=%s "
+                    f"WHERE auction_id=%s AND stream_version=%s",
+                    (company, offer, recorded.stream_version, auction_id, recorded.stream_version - 1),
                 )
             case WinningBidAccepted():
                 cursor.execute(
-                    f"UPDATE {table} SET lifecycle='allocated', stream_version=%s WHERE auction_id=%s AND stream_version < %s",
-                    (recorded.stream_version, auction_id, recorded.stream_version),
+                    f"UPDATE {table} SET lifecycle='allocated', stream_version=%s "
+                    f"WHERE auction_id=%s AND stream_version=%s",
+                    (recorded.stream_version, auction_id, recorded.stream_version - 1),
                 )
             case AuctionExpired():
                 cursor.execute(
-                    f"UPDATE {table} SET lifecycle='expired', stream_version=%s WHERE auction_id=%s AND stream_version < %s",
-                    (recorded.stream_version, auction_id, recorded.stream_version),
+                    f"UPDATE {table} SET lifecycle='expired', stream_version=%s "
+                    f"WHERE auction_id=%s AND stream_version=%s",
+                    (recorded.stream_version, auction_id, recorded.stream_version - 1),
                 )
+            case _:
+                raise TypeError(f"Auction overview cannot project {type(recorded.event).__name__}")
+        if cursor.rowcount != 1:
+            raise ProjectionGap(f"{recorded.stream_id} v{recorded.stream_version} did not change its projection")

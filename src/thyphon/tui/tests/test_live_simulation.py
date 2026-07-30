@@ -18,6 +18,15 @@ class LiveSimulationBehaviour(unittest.TestCase):
         self.assertTrue(all(tick.market_note for tick in market.tape))
         self.assertGreater(len(market.store.all_events()), 2)
 
+    def test_long_session_bounds_presentation_buffers_without_replaying_history(self) -> None:
+        market = DeterministicMarket(seed=18374)
+        market.run(300)
+
+        self.assertEqual(market.tick, 300)
+        self.assertLessEqual(len(market.tape), market._tape_limit)
+        self.assertLessEqual(len(market._published), market._published_limit)
+        self.assertGreater(market.published_count, len(market._published))
+
 
 if __name__ == "__main__":
     unittest.main()

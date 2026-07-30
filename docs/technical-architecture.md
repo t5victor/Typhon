@@ -136,7 +136,9 @@ infrastructure failures such as a PostgreSQL restart.
 
 Kafka records are verified against the canonical PostgreSQL row before they are
 projected or allowed to start Settlement. The check covers event ID, stream,
-version, global position, payload and trace metadata.
+version, global position, payload and trace metadata. Projection and Settlement
+then run in separate consumer groups: a broken `auction_overview` must not stop
+the causal creation of a Settlement.
 
 ## Projections and consistency
 
@@ -149,8 +151,11 @@ success. It is quarantined and later repaired by rebuilding that stream from the
 Event Store in canonical order.
 
 The full rebuild uses a shadow table under the same advisory lock as the live
-projector. Readers see the old projection until the final table swap; they do
-not observe an empty or partially replayed model.
+projector. It replays every aggregate in `stream_version` order, not delivery
+position order, and requires each transition to change exactly one row. Any
+gap aborts the transaction before the table swap or receipt rewrite. Readers
+see the old projection until the final swap; they do not observe an empty or
+partially replayed model.
 
 Queries can request minimum_version. If the projection has not caught up, the
 API returns 202 Accepted with Retry-After instead of blocking an API worker.
@@ -202,12 +207,18 @@ Repeating a request returns the active attempt instead of creating an orphan. A
 terminal duplicate delivery is a no-op; an unknown or mismatched attempt is
 quarantined.
 
+The command defaults to `auction-overview-v1`. Set
+`THYPHON_REDRIVE_CONSUMER=settlement-process-manager-v1` when repairing the
+independent Settlement process manager.
+
 ## Event contracts and migrations
 
 Envelopes include schema_version. Readers reject versions below one or newer
 than the supported contract. Upcasting is explicit and local to the event
-adapter. Historical SettlementRequested v1 is readable with a missing causal
-winning-bid ID; current commands require one.
+adapter. A broker message whose identity is canonical but whose schema is too
+new is quarantined as a repairable canonical failure, rather than discarded as
+raw broker input. Historical SettlementRequested v1 is readable with a missing
+causal winning-bid ID; current commands require one.
 
 Migrations are ordered and recorded in schema_migration. The legacy stream
 migration converts raw stream IDs to namespaced IDs and updates stream heads,
@@ -227,7 +238,8 @@ delivery is then verified.
 | migrate | ordered schema migrations |
 | api | authenticated command and query boundary |
 | outbox-worker | canonical event publication |
-| projection-worker | Auction projection and Settlement process manager |
+| projection-worker | Auction overview projection only |
+| settlement-process-manager | Independent WinningBidAccepted → Settlement workflow |
 | redrive-outbox-worker | redrive attempt publication |
 | dead-letter-outbox-worker | bounded DLQ reference publication |
 

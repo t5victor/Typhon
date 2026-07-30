@@ -80,7 +80,7 @@ def render(market: DeterministicMarket, width: int | None = None, colour: bool =
     health_panel = Panel("SYSTEM HEALTH", (
         "Runtime      local simulator",
         f"Events       {market.store.event_count():>4}",
-        f"Messages     {len(market._published):>4}",
+        f"Messages     {market.published_count:>4}",
         "Projection   idempotent",
     ), Ink.amber)
     tape_lines = [

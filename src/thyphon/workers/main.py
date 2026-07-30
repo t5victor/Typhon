@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 from thyphon.application.settlement_commands import SettlementCommandHandler
 from thyphon.projections.postgres_auction_overview import PostgresAuctionOverviewProjector
-from thyphon.infrastructure.postgres_event_store import PostgresEventStore
+from thyphon.infrastructure.postgres_event_store import CanonicalEventDecodeError, PostgresEventStore
 from thyphon.auction.domain.events.winning_bid_accepted.event import WinningBidAccepted
 from thyphon.settlement.domain.commands.request_settlement.command import RequestSettlement
 from thyphon.shared.domain import CommandContext, aggregate_id
@@ -359,8 +359,6 @@ async def run_projection() -> None:
     bootstrap = os.environ["THYPHON_KAFKA_BOOTSTRAP"]
     dsn = os.environ["THYPHON_DATABASE_URL"]
     projector = PostgresAuctionOverviewProjector(dsn)
-    settlement_store = PostgresEventStore(dsn)
-    settlements = SettlementCommandHandler(settlement_store)
     failure_pool: Any = ConnectionPool(conninfo=dsn, min_size=1, max_size=4, kwargs={"autocommit": True}, open=True)
     consumer = consumer_type(
         "thyphon.domain-events", bootstrap_servers=bootstrap, group_id="thyphon-auction-overview-v1",
@@ -397,11 +395,17 @@ async def run_projection() -> None:
                                         failure = None
                                         break
                                     projector.rebuild_stream(recorded.stream_id)
-                                    _request_settlement_for_winning_bid(settlements, canonical)
                         else:
                             projector.apply(recorded)
-                            _request_settlement_for_winning_bid(settlements, canonical)
                         failure = None
+                        break
+                    except CanonicalEventDecodeError as error:
+                        # The Event Store comparison already succeeded. Keep
+                        # this failure repairable after a rolling reader
+                        # upgrade instead of classifying it as arbitrary raw
+                        # broker input.
+                        canonical_event_id = error.event_id
+                        failure = error
                         break
                     except Exception as error:
                         if _is_infrastructure_error(error):
@@ -465,8 +469,129 @@ async def run_projection() -> None:
     finally:
         await consumer.stop()
         failure_pool.close()
-        settlement_store.close()
         projector.close()
+
+
+async def run_settlement_process_manager() -> None:
+    """Consume winning bids independently from the auction read model.
+
+    Settlement is a causal reaction to the immutable Auction fact. A broken
+    dashboard must not stop that financial workflow, so it owns its Kafka
+    group, receipts/failures and checkpoint.
+    """
+    _, consumer_type, _ = _runtime()
+    try:
+        from psycopg_pool import ConnectionPool
+    except ImportError as error:  # pragma: no cover - runtime extra
+        raise RuntimeError("Install Thyphon with the 'runtime' extra") from error
+    consumer_name = "settlement-process-manager-v1"
+    bootstrap = os.environ["THYPHON_KAFKA_BOOTSTRAP"]
+    dsn = os.environ["THYPHON_DATABASE_URL"]
+    settlement_store = PostgresEventStore(dsn)
+    settlements = SettlementCommandHandler(settlement_store)
+    failure_pool: Any = ConnectionPool(conninfo=dsn, min_size=1, max_size=4, kwargs={"autocommit": True}, open=True)
+    consumer = consumer_type(
+        "thyphon.domain-events", bootstrap_servers=bootstrap, group_id=consumer_name,
+        enable_auto_commit=False, auto_offset_reset="earliest",
+    )
+    await consumer.start()
+    try:
+        infrastructure_retries: dict[tuple[str, int, int], int] = {}
+        async for message in consumer:
+            envelope: dict[str, Any] | None = None
+            candidate_event_id: UUID | None = None
+            canonical_event_id: UUID | None = None
+            failure: Exception | None = None
+            infrastructure_error: Exception | None = None
+            redrive_attempt: UUID | None = None
+            try:
+                envelope = _parse_envelope(message.value)
+                candidate_event_id = _event_id_or_none(envelope)
+                redrive_attempt = _redrive_attempt_id(message.headers)
+                for attempt in range(1, 4):
+                    try:
+                        canonical = settlement_store.canonical_event(envelope)
+                        recorded = canonical.recorded
+                        canonical_event_id = recorded.event.event_id
+                        if redrive_attempt is not None:
+                            with failure_pool.connection() as failure_store:
+                                with _locked_active_redrive_attempt(
+                                    failure_store, attempt_id=redrive_attempt, consumer_name=consumer_name,
+                                    event_id=canonical_event_id,
+                                ) as requires_rebuild:
+                                    if requires_rebuild:
+                                        _request_settlement_for_winning_bid(settlements, canonical)
+                        else:
+                            _request_settlement_for_winning_bid(settlements, canonical)
+                        failure = None
+                        break
+                    except CanonicalEventDecodeError as error:
+                        canonical_event_id = error.event_id
+                        failure = error
+                        break
+                    except Exception as error:
+                        if _is_infrastructure_error(error):
+                            infrastructure_error = error
+                            break
+                        failure = error
+                        if attempt < 3:
+                            await asyncio.sleep(0.1 * attempt)
+            except Exception as error:
+                if _is_infrastructure_error(error):
+                    infrastructure_error = error
+                else:
+                    failure = error
+            if infrastructure_error is not None:
+                retry_key = (message.topic, message.partition, message.offset)
+                retry_count = infrastructure_retries.get(retry_key, 0) + 1
+                infrastructure_retries[retry_key] = retry_count
+                await asyncio.sleep(min(30.0, 0.25 * (2 ** (retry_count - 1))))
+                from aiokafka import TopicPartition
+                consumer.seek(TopicPartition(message.topic, message.partition), message.offset)
+                continue
+            infrastructure_retries.pop((message.topic, message.partition, message.offset), None)
+            if failure is not None:
+                try:
+                    with failure_pool.connection() as failure_store:
+                        _quarantine(
+                            message=message, error=failure, event_id=canonical_event_id,
+                            candidate_event_id=candidate_event_id,
+                            redrive_attempt=redrive_attempt, failure_store=failure_store,
+                            consumer_name=consumer_name,
+                        )
+                except Exception as quarantine_error:
+                    if _is_infrastructure_error(quarantine_error):
+                        retry_key = (message.topic, message.partition, message.offset)
+                        retry_count = infrastructure_retries.get(retry_key, 0) + 1
+                        infrastructure_retries[retry_key] = retry_count
+                        await asyncio.sleep(min(30.0, 0.25 * (2 ** (retry_count - 1))))
+                        from aiokafka import TopicPartition
+                        consumer.seek(TopicPartition(message.topic, message.partition), message.offset)
+                        continue
+                    raise
+            try:
+                with failure_pool.connection() as failure_store:
+                    with failure_store.transaction(), failure_store.cursor() as cursor:
+                        cursor.execute(
+                            "INSERT INTO process_checkpoint(process_name, last_observed_at) VALUES (%s, NOW()) "
+                            "ON CONFLICT (process_name) DO UPDATE SET last_observed_at=EXCLUDED.last_observed_at",
+                            (consumer_name,),
+                        )
+            except Exception as checkpoint_error:
+                if _is_infrastructure_error(checkpoint_error):
+                    retry_key = (message.topic, message.partition, message.offset)
+                    retry_count = infrastructure_retries.get(retry_key, 0) + 1
+                    infrastructure_retries[retry_key] = retry_count
+                    await asyncio.sleep(min(30.0, 0.25 * (2 ** (retry_count - 1))))
+                    from aiokafka import TopicPartition
+                    consumer.seek(TopicPartition(message.topic, message.partition), message.offset)
+                    continue
+                raise
+            await consumer.commit()
+    finally:
+        await consumer.stop()
+        failure_pool.close()
+        settlement_store.close()
 
 
 def main() -> None:
@@ -479,8 +604,13 @@ def main() -> None:
         asyncio.run(run_dead_letter_outbox())
     elif mode == "projection":
         asyncio.run(run_projection())
+    elif mode == "settlement-process-manager":
+        asyncio.run(run_settlement_process_manager())
     else:
-        raise SystemExit("usage: python -m thyphon.workers.main {outbox|redrive-outbox|dead-letter-outbox|projection}")
+        raise SystemExit(
+            "usage: python -m thyphon.workers.main "
+            "{outbox|redrive-outbox|dead-letter-outbox|projection|settlement-process-manager}"
+        )
 
 
 if __name__ == "__main__":

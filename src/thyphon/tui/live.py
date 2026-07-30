@@ -17,7 +17,12 @@ class Colour:
     ACCENT = 7
 
 
-def _colour_setup() -> None:
+_colour_enabled = False
+
+
+def _colour_setup() -> bool:
+    if not curses.has_colors():
+        return False
     curses.start_color()
     curses.use_default_colors()
     curses.init_pair(Colour.FRAME, curses.COLOR_CYAN, -1)
@@ -27,6 +32,7 @@ def _colour_setup() -> None:
     curses.init_pair(Colour.AMBER, curses.COLOR_YELLOW, -1)
     curses.init_pair(Colour.MUTED, curses.COLOR_BLUE, -1)
     curses.init_pair(Colour.ACCENT, curses.COLOR_MAGENTA, -1)
+    return True
 
 
 def _add(screen, y: int, x: int, text: str, colour: int = 0, bold: bool = False) -> None:
@@ -34,7 +40,7 @@ def _add(screen, y: int, x: int, text: str, colour: int = 0, bold: bool = False)
     height, width = screen.getmaxyx()
     if y < 0 or y >= height or x >= width:
         return
-    attributes = curses.color_pair(colour) | (curses.A_BOLD if bold else 0)
+    attributes = (curses.color_pair(colour) if _colour_enabled else 0) | (curses.A_BOLD if bold else 0)
     try:
         screen.addnstr(y, max(0, x), text, max(0, width - x - 1), attributes)
     except curses.error:
@@ -97,7 +103,7 @@ def _system_panel(screen, market: DeterministicMarket, top: int, left: int, widt
         ("SIMULATION", "PAUSED" if paused else "RUNNING", Colour.AMBER if paused else Colour.POSITIVE),
         ("TICK RATE", f"{1 / interval:4.1f}/sec", Colour.ACCENT),
         ("EVENTS", f"{events:>8}", Colour.FRAME),
-        ("LOCAL OUTBOX", f"{len(market._published):>5} sent", Colour.POSITIVE),
+        ("LOCAL OUTBOX", f"{market.published_count:>5} sent", Colour.POSITIVE),
         ("SIM PROJECTION", "caught up", Colour.POSITIVE),
     )
     for offset, (label, value, colour) in enumerate(rows, start=1):
@@ -172,11 +178,12 @@ def _request_seed(screen, current_seed: int) -> int | None:
         return None
 
 
-def run(screen, market: DeterministicMarket, ticks: int | None, interval: float) -> None:
+def run(screen, market: DeterministicMarket, ticks: int | None, interval: float, plain: bool = False) -> None:
+    global _colour_enabled
     curses.curs_set(0)
     screen.nodelay(True)
     screen.keypad(True)
-    _colour_setup()
+    _colour_enabled = not plain and _colour_setup()
     market.bootstrap()
     paused = False
     deadline = monotonic()
