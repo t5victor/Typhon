@@ -36,7 +36,7 @@ flowchart LR
 ```
 
 One accepted decision produces immutable facts first. Kafka carries those facts
-after commit; projections and Settlement react asynchronously. The console is
+after commit, projections and Settlement react asynchronously. The console is
 deliberately separate from the distributed runtime so a seed can be replayed
 without Docker.
 
@@ -50,8 +50,9 @@ without Docker.
   transactional outbox.
 - Kafka delivery, canonical-event verification, idempotent projections,
   bounded DLQ publication and durable redrive attempts.
-- A curses-based ASCII market console and a deterministic local simulator.
-- Bazel for hermetic tests; Compose integration checks in CI.
+- A curses based ASCII market console and a deterministic local simulator.
+- Bazel for hermetic tests
+- Compose integration checks in CI
 
 ## Terminal simulator
 
